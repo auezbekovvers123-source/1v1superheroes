@@ -1,0 +1,20 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://Scripts/Combat/Dummy.gd" id="1_dummy"]
+[ext_resource type="PackedScene" uid="uid://bvngjite6ohh5" path="res://Assets/Models/Characters/С11.glb" id="2_c11"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_dummy"]
+radius = 0.33
+height = 1.82
+
+[node name="Dummy" type="CharacterBody3D" groups=["dummy","fighter"]]
+script = ExtResource("1_dummy")
+
+[node name="Mesh" type="Node3D" parent="."]
+transform = Transform3D(-1, 0, 0, 0, 1, 0, 0, 0, -1, 0, 0, 0)
+
+[node name="C11" parent="Mesh" instance=ExtResource("2_c11")]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9215, 0)
+shape = SubResource("CapsuleShape3D_dummy")

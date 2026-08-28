@@ -1,0 +1,74 @@
+[gd_scene load_steps=12 format=3 uid="uid://cr2ersq7g6q6f"]
+
+[ext_resource type="Script" path="res://Scripts/Characters/Player.gd" id="1_hn6di"]
+[ext_resource type="Script" path="res://Scripts/Characters/SpringArmPivot.gd" id="2_f8ihf"]
+[ext_resource type="PackedScene" uid="uid://bvngjite6ohh5" path="res://Assets/Models/Characters/С11.glb" id="3_c11"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_k6p7c"]
+radius = 0.283343
+height = 1.84319
+
+[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_dfvqk"]
+animation = &"falling_idle"
+
+[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_u51wd"]
+animation = &"Idle"
+
+[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_2dl1e"]
+animation = &"running"
+
+[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_yfirh"]
+animation = &"Walk"
+
+[sub_resource type="AnimationNodeTransition" id="AnimationNodeTransition_hbu2o"]
+xfade_time = 0.2
+input_0/name = "grounded"
+input_0/auto_advance = false
+input_1/name = "air"
+
+[sub_resource type="AnimationNodeBlend3" id="AnimationNodeBlend3_3c3it"]
+
+[sub_resource type="AnimationNodeBlendTree" id="AnimationNodeBlendTree_rsvoc"]
+graph_offset = Vector2(-43.7693, 23.4538)
+nodes/Air/node = SubResource("AnimationNodeAnimation_dfvqk")
+nodes/Air/position = Vector2(420, 340)
+nodes/Idle/node = SubResource("AnimationNodeAnimation_u51wd")
+nodes/Idle/position = Vector2(195, 112)
+nodes/Run/node = SubResource("AnimationNodeAnimation_2dl1e")
+nodes/Run/position = Vector2(200, 340)
+nodes/Walk/node = SubResource("AnimationNodeAnimation_yfirh")
+nodes/Walk/position = Vector2(200, 220)
+nodes/ground_air_transition/node = SubResource("AnimationNodeTransition_hbu2o")
+nodes/ground_air_transition/position = Vector2(640, 160)
+nodes/iwr_blend/node = SubResource("AnimationNodeBlend3_3c3it")
+nodes/iwr_blend/position = Vector2(420, 160)
+nodes/output/position = Vector2(860, 160)
+node_connections = [&"ground_air_transition", 0, &"iwr_blend", &"ground_air_transition", 1, &"Air", &"iwr_blend", 0, &"Idle", &"iwr_blend", 1, &"Walk", &"iwr_blend", 2, &"Run", &"output", 0, &"ground_air_transition"]
+
+[node name="Player" type="CharacterBody3D"]
+script = ExtResource("1_hn6di")
+
+[node name="Mesh" type="Node3D" parent="."]
+transform = Transform3D(-1, 0, 0, 0, 1, 0, 0, 0, -1, 0, 0, 0)
+
+[node name="C11" parent="Mesh" instance=ExtResource("3_c11")]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9215, 0)
+shape = SubResource("CapsuleShape3D_k6p7c")
+
+[node name="SpringArmPivot" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
+script = ExtResource("2_f8ihf")
+
+[node name="SpringArm3D" type="SpringArm3D" parent="SpringArmPivot"]
+spring_length = 3.0
+
+[node name="Camera3D" type="Camera3D" parent="SpringArmPivot/SpringArm3D"]
+
+[node name="AnimationPlayer" type="AnimationPlayer" parent="."]
+
+[node name="AnimationTree" type="AnimationTree" parent="."]
+tree_root = SubResource("AnimationNodeBlendTree_rsvoc")
+anim_player = NodePath("Mesh/C11/AnimationPlayer")
+active = true
