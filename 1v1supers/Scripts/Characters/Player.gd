@@ -6,6 +6,7 @@ const CloakScene = preload("res://Scenes/Items/Cloak.tscn")
 const EquipmentCls = preload("res://Scripts/Item/Equipment.gd")
 const InventoryCls = preload("res://Scripts/Item/Inventory.gd")
 const RagdollCls = preload("res://Scripts/Combat/RagdollController.gd")
+const GrabberCls = preload("res://Scripts/Combat/RagdollGrabber.gd")
 ## Player.gd — Third-person CharacterBody3D controller + SATISFYING COMBAT
 ## Features:
 ##  - Over-the-shoulder camera via SpringArmPivot (Node3D) + SpringArm3D + Camera3D
@@ -113,6 +114,7 @@ var hurtbox: Area3D
 var hitbox_main: Area3D
 var hitbox_kick: Area3D
 var ragdoll: RagdollController = null
+var grabber: RagdollGrabber = null
 
 # Wearable / Equipment
 var equipment: Equipment = null
@@ -132,6 +134,7 @@ func _ready() -> void:
 		health.damaged.connect(_on_damaged)
 		health.died.connect(_on_died)
 	_setup_ragdoll()
+	_setup_grabber()
 	_setup_wearables()
 
 func _setup_combat_nodes() -> void:
@@ -225,6 +228,18 @@ func _setup_ragdoll() -> void:
 	ragdoll.name = "RagdollController"
 	ragdoll.impulse_multiplier = 1.35
 	add_child(ragdoll)
+
+func _setup_grabber() -> void:
+	var existing_g = get_node_or_null("RagdollGrabber")
+	if existing_g and existing_g is RagdollGrabber:
+		grabber = existing_g as RagdollGrabber
+		return
+	grabber = GrabberCls.new()
+	grabber.name = "RagdollGrabber"
+	grabber.grab_radius = 2.8
+	grabber.grab_bone_radius = 1.6
+	grabber.debug_log = true
+	add_child(grabber)
 
 func _setup_wearables() -> void:
 	# Equipment manager
@@ -728,6 +743,9 @@ func _on_died(_killer: Node) -> void:
 	_hitbox_active = false
 	if hitbox_main: hitbox_main.set("active", false)
 	if hitbox_kick: hitbox_kick.set("active", false)
+	# Drop grabbed body if we die
+	if grabber and grabber.is_grabbing():
+		grabber.release_grab()
 	# --- GTA5 ragdoll ---
 	if ragdoll == null:
 		_setup_ragdoll()
@@ -763,7 +781,12 @@ func _on_died(_killer: Node) -> void:
 			tw.tween_property(player_mesh, "scale", Vector3.ONE, 0.4)
 
 func _respawn_after_death() -> void:
+	if has_meta("is_being_grabbed") and bool(get_meta("is_being_grabbed")):
+		print("[Player] respawn BLOCKED while grabbed")
+		return
 	# Called by Health after timer — reset ragdoll before teleport
+	if grabber and grabber.is_grabbing():
+		grabber.release_grab()
 	if ragdoll and ragdoll.is_ragdolled():
 		ragdoll.reset_ragdoll()
 	global_position = Vector3(0, 2.2, 0)
@@ -900,14 +923,58 @@ func _unhandled_input(event: InputEvent) -> void:
 			toggle_cloak()
 			get_viewport().set_input_as_handled()
 			return
-		# Pick up item with F
+		# Grab ragdoll / Pick up item with F (grab takes priority)
 		if event.keycode == KEY_F:
-			if _try_interact_pickup():
+			if _try_grab_or_pickup():
 				get_viewport().set_input_as_handled()
 				return
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not is_picking_up:
 			_try_attack()
+
+func _try_grab_or_pickup() -> bool:
+	# If currently grabbing, release first (F toggles)
+	if grabber and grabber.is_grabbing():
+		grabber.release_grab()
+		print("[Player] Released ragdoll")
+		return true
+	# Try grab nearest ragdolled body before item pickup (neck-exact)
+	if grabber:
+		if grabber.try_grab_nearest():
+			print("[Player] Grabbed ragdoll at neck")
+			_play_grab_pickup_anim()
+			return true
+	# Fallback to item pickup
+	return _try_interact_pickup()
+
+func _play_grab_pickup_anim() -> void:
+	# Play pick_up exactly as item pickup, so dummy is visibly lifted from neck
+	if c11_ap == null or is_picking_up:
+		return
+	var pickup_anim := ""
+	for candidate in ["pick_up", "pickup", "Pick_up", "PickUp", "pick_up_item"]:
+		if c11_ap.has_animation(candidate):
+			pickup_anim = candidate
+			break
+	if pickup_anim == "":
+		for anim_name in c11_ap.get_animation_list():
+			if anim_name.to_lower().begins_with("pick"):
+				pickup_anim = anim_name
+				break
+	if pickup_anim != "" and c11_ap:
+		is_picking_up = true
+		_play_c11(pickup_anim, 0.08, 1.35)
+		# is_picking_up will be cleared by _on_c11_animation_finished when pick* ends
+		# Don't block ragdoll carry: allow tiny movement during pick (freeze is handled in _physics_process is_picking_up branch)
+		if player_mesh:
+			var dir := Vector3.ZERO
+			if grabber and grabber.get_grabbed_body():
+				var body := grabber.get_grabbed_body() as Node3D
+				if body:
+					dir = (body.global_position - global_position)
+					dir.y = 0
+					if dir.length() > 0.05:
+						player_mesh.look_at(global_position - dir.normalized(), Vector3.UP)
 
 func _try_interact_pickup() -> bool:
 	if is_picking_up or is_attacking:
@@ -1026,10 +1093,13 @@ func _physics_process(delta: float) -> void:
 		move_direction = move_direction.rotated(Vector3.UP, spring_arm_pivot.rotation.y)
 	# ---- Speed toggle ----
 	var is_sprinting: bool = Input.is_action_pressed("run") and not is_attacking and _stun_timer <= 0.0 and not is_aiming
+	var grab_slow: float = 0.68 if (grabber and grabber.is_grabbing()) else 1.0
 	if is_sprinting:
-		speed = run_speed
+		speed = run_speed * grab_slow
+		if grabber and grabber.is_grabbing():
+			speed = run_speed * 0.78 # slightly less slow when running with body
 	else:
-		speed = walk_speed
+		speed = walk_speed * grab_slow
 	# ---- Coyote + Buffer + Gravity ----
 	if is_on_floor():
 		coyote_timer = coyote_time

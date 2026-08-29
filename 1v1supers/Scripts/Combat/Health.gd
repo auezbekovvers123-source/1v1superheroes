@@ -249,33 +249,63 @@ func _do_death_effect(_killer: Node) -> void:
 			respawn_delay = max(respawn_delay, 2.5)
 		var t := body.get_tree().create_timer(respawn_delay)
 		t.timeout.connect(func():
-			if is_instance_valid(body):
-				current = max_health
-				is_dead = false
-				_last_knockback = Vector3.ZERO
-				if body.has_method("respawn"):
-					body.respawn()
-				else:
-					body.global_position += Vector3(0, 0.1, 0)
-				health_changed.emit(current, max_health)
+			if not is_instance_valid(body):
+				return
+			# While being grabbed, defer respawn — only after release
+			await _wait_until_not_grabbed(body)
+			if not is_instance_valid(body):
+				return
+			# If already respawned by grab-release logic, skip
+			if not is_dead:
+				return
+			current = max_health
+			is_dead = false
+			_last_knockback = Vector3.ZERO
+			if body.has_method("respawn"):
+				body.respawn()
+			else:
+				body.global_position += Vector3(0, 0.1, 0)
+			health_changed.emit(current, max_health)
 		)
 	else:
 		# player death: slight time slow + respawn after 2.5s at y+2 (let ragdoll flop like GTA)
 		var pd: float = 2.8
 		var t2 := body.get_tree().create_timer(pd)
 		t2.timeout.connect(func():
-			if is_instance_valid(body):
-				current = max_health
-				is_dead = false
-				_last_knockback = Vector3.ZERO
-				if body.has_method("_respawn_after_death"):
-					body.call("_respawn_after_death")
-				else:
-					if body.has_node("RagdollController"):
-						var rc = body.get_node("RagdollController")
-						if rc and rc.has_method("reset_ragdoll"):
-							rc.reset_ragdoll()
-					body.global_position = Vector3(0, 2.2, 0)
-					body.velocity = Vector3.ZERO
-				health_changed.emit(current, max_health)
+			if not is_instance_valid(body):
+				return
+			await _wait_until_not_grabbed(body)
+			if not is_instance_valid(body):
+				return
+			if not is_dead:
+				return
+			current = max_health
+			is_dead = false
+			_last_knockback = Vector3.ZERO
+			if body.has_method("_respawn_after_death"):
+				body.call("_respawn_after_death")
+			else:
+				if body.has_node("RagdollController"):
+					var rc = body.get_node("RagdollController")
+					if rc and rc.has_method("reset_ragdoll"):
+						rc.reset_ragdoll()
+				body.global_position = Vector3(0, 2.2, 0)
+				body.velocity = Vector3.ZERO
+			health_changed.emit(current, max_health)
 		)
+
+func _wait_until_not_grabbed(body: Node) -> void:
+	# Poll until grab released. If never grabbed, returns immediately.
+	while is_instance_valid(body) and body.has_meta("is_being_grabbed") and bool(body.get_meta("is_being_grabbed")):
+		if not is_instance_valid(body):
+			return
+		var tree = body.get_tree()
+		if tree == null:
+			return
+		await tree.create_timer(0.2).timeout
+	# Extra small delay so physics can settle after drop
+	if is_instance_valid(body) and body.has_meta("is_being_grabbed"):
+		pass
+	else:
+		# brief settle delay only if we actually waited
+		pass

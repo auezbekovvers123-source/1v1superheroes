@@ -4,8 +4,11 @@
 
 [node name="Prototype" unique_id=373863090 instance=ExtResource("1_gxbh7")]
 
+[node name="Player" parent="." index="5"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.03115195, 0)
+
 [node name="Dummy" parent="." index="6"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3.2, 0.92, 6.1487226)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3.2, 0.055469453, 6.1487226)
 
 [node name="Dummy2" parent="." index="7"]
 visible = false

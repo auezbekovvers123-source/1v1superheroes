@@ -339,6 +339,9 @@ func _on_died(_killer: Node) -> void:
 	# (previously this and Health both scheduled respawn causing double teleport + slide)
 
 func respawn() -> void:
+	if has_meta("is_being_grabbed") and bool(get_meta("is_being_grabbed")):
+		print("[Dummy] respawn BLOCKED while grabbed %s" % name)
+		return
 	if not health.is_dead and not (ragdoll and ragdoll.is_ragdolled()):
 		return
 	var cs := get_node_or_null("CollisionShape3D") as CollisionShape3D
