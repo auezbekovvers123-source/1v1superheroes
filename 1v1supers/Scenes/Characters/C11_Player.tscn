@@ -21,12 +21,83 @@ animation = &"running"
 animation = &"Walk"
 
 [sub_resource type="AnimationNodeTransition" id="AnimationNodeTransition_hbu2o"]
-xfade_time = 0.2
+xfade_time = 0.28
 input_0/name = "grounded"
 input_0/auto_advance = false
 input_1/name = "air"
 
 [sub_resource type="AnimationNodeBlend3" id="AnimationNodeBlend3_3c3it"]
+
+[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_upper_action"]
+resource_local_to_scene = true
+animation = &"punch_hook"
+
+[sub_resource type="AnimationNodeTimeScale" id="AnimationNodeTimeScale_upper_scale"]
+resource_local_to_scene = true
+
+[sub_resource type="AnimationNodeTimeScale" id="AnimationNodeTimeScale_walk_scale"]
+resource_local_to_scene = true
+
+[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_walk_left"]
+resource_local_to_scene = true
+animation = &"Walk_left"
+
+[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_walk_right"]
+resource_local_to_scene = true
+animation = &"Walk_right"
+
+[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_walk_back"]
+resource_local_to_scene = true
+animation = &"Walk_backwards"
+
+[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_walk_lf"]
+resource_local_to_scene = true
+animation = &"Walk_Left_forward"
+
+[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_walk_rf"]
+resource_local_to_scene = true
+animation = &"Walk_Right_forward"
+
+[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_walk_lb"]
+resource_local_to_scene = true
+animation = &"Walk_Left_backwards"
+
+[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_walk_rb"]
+resource_local_to_scene = true
+animation = &"Walk_Right_backwards"
+
+[sub_resource type="AnimationNodeBlendSpace2D" id="AnimationNodeBlendSpace2D_walkspace"]
+resource_local_to_scene = true
+blend_mode = 0
+sync = true
+blend_point_0/node = SubResource("AnimationNodeAnimation_yfirh")
+blend_point_0/pos = Vector2(0, 1)
+blend_point_1/node = SubResource("AnimationNodeAnimation_walk_back")
+blend_point_1/pos = Vector2(0, -1)
+blend_point_2/node = SubResource("AnimationNodeAnimation_walk_left")
+blend_point_2/pos = Vector2(-1, 0)
+blend_point_3/node = SubResource("AnimationNodeAnimation_walk_right")
+blend_point_3/pos = Vector2(1, 0)
+blend_point_4/node = SubResource("AnimationNodeAnimation_walk_lf")
+blend_point_4/pos = Vector2(-1, 1)
+blend_point_5/node = SubResource("AnimationNodeAnimation_walk_rf")
+blend_point_5/pos = Vector2(1, 1)
+blend_point_6/node = SubResource("AnimationNodeAnimation_walk_lb")
+blend_point_6/pos = Vector2(-1, -1)
+blend_point_7/node = SubResource("AnimationNodeAnimation_walk_rb")
+blend_point_7/pos = Vector2(1, -1)
+min_space = Vector2(-1, -1)
+max_space = Vector2(1, 1)
+x_label = "strafe"
+y_label = "forward"
+
+[sub_resource type="AnimationNodeOneShot" id="AnimationNodeOneShot_upper_oneshot"]
+resource_local_to_scene = true
+filter_enabled = true
+filters = ["root/Skeleton3D:c_traj", "root/Skeleton3D:root.x", "root/Skeleton3D:spine_02.x", "root/Skeleton3D:spine_03.x", "root/Skeleton3D:neck.x", "root/Skeleton3D:head.x", "root/Skeleton3D:shoulder.r", "root/Skeleton3D:arm_stretch.r", "root/Skeleton3D:forearm_stretch.r", "root/Skeleton3D:hand.r", "root/Skeleton3D:index1_base.r", "root/Skeleton3D:index1.r", "root/Skeleton3D:index2.r", "root/Skeleton3D:index3.r", "root/Skeleton3D:shoulder.l", "root/Skeleton3D:arm_stretch.l", "root/Skeleton3D:forearm_stretch.l", "root/Skeleton3D:hand.l", "root/Skeleton3D:index1_base.l", "root/Skeleton3D:index1.l", "root/Skeleton3D:index2.l", "root/Skeleton3D:index3.l"]
+fadein_time = 0.08
+fadeout_time = 0.14
+mix_mode = 0
 
 [sub_resource type="AnimationNodeBlendTree" id="AnimationNodeBlendTree_rsvoc"]
 graph_offset = Vector2(-43.7693, 23.4538)
@@ -36,14 +107,22 @@ nodes/Idle/node = SubResource("AnimationNodeAnimation_u51wd")
 nodes/Idle/position = Vector2(195, 112)
 nodes/Run/node = SubResource("AnimationNodeAnimation_2dl1e")
 nodes/Run/position = Vector2(200, 340)
-nodes/Walk/node = SubResource("AnimationNodeAnimation_yfirh")
-nodes/Walk/position = Vector2(200, 220)
+nodes/WalkSpace/node = SubResource("AnimationNodeBlendSpace2D_walkspace")
+nodes/WalkSpace/position = Vector2(200, 220)
+nodes/UpperAction/node = SubResource("AnimationNodeAnimation_upper_action")
+nodes/UpperAction/position = Vector2(200, 440)
+nodes/UpperScale/node = SubResource("AnimationNodeTimeScale_upper_scale")
+nodes/UpperScale/position = Vector2(420, 440)
+nodes/WalkScale/node = SubResource("AnimationNodeTimeScale_walk_scale")
+nodes/WalkScale/position = Vector2(200, 280)
+nodes/UpperOneShot/node = SubResource("AnimationNodeOneShot_upper_oneshot")
+nodes/UpperOneShot/position = Vector2(640, 360)
 nodes/ground_air_transition/node = SubResource("AnimationNodeTransition_hbu2o")
 nodes/ground_air_transition/position = Vector2(640, 160)
 nodes/iwr_blend/node = SubResource("AnimationNodeBlend3_3c3it")
 nodes/iwr_blend/position = Vector2(420, 160)
 nodes/output/position = Vector2(860, 160)
-node_connections = [&"ground_air_transition", 0, &"iwr_blend", &"ground_air_transition", 1, &"Air", &"iwr_blend", 0, &"Idle", &"iwr_blend", 1, &"Walk", &"iwr_blend", 2, &"Run", &"output", 0, &"ground_air_transition"]
+node_connections = [&"output", 0, &"UpperOneShot", &"UpperOneShot", 0, &"ground_air_transition", &"UpperOneShot", 1, &"UpperScale", &"UpperScale", 0, &"UpperAction", &"WalkScale", 0, &"WalkSpace", &"ground_air_transition", 0, &"iwr_blend", &"ground_air_transition", 1, &"Air", &"iwr_blend", 0, &"Idle", &"iwr_blend", 1, &"WalkScale", &"iwr_blend", 2, &"Run"]
 
 [node name="C11_Player" type="CharacterBody3D"]
 script = ExtResource("1_hn6di")
@@ -74,3 +153,11 @@ spring_length = 3.0
 tree_root = SubResource("AnimationNodeBlendTree_rsvoc")
 anim_player = NodePath("Mesh/C11/AnimationPlayer")
 active = true
+parameters/UpperOneShot/request = 0
+parameters/UpperOneShot/active = false
+parameters/UpperScale/scale = 1.0
+parameters/WalkScale/scale = 1.25
+parameters/WalkSpace/blend_position = Vector2(0, 1)
+parameters/WalkSpace/blend_mode = 0
+parameters/ground_air_transition/current_state = "grounded"
+parameters/iwr_blend/blend_amount = 0.0

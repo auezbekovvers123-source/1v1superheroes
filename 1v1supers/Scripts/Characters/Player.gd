@@ -26,6 +26,26 @@ var c11_ap: AnimationPlayer = null
 var c11_use_direct: bool = false
 var c11_current_anim: String = ""
 
+# --- Layered AnimationTree (upper-body) ---
+# When true, upper actions (punch/pickup/throw) play on a filtered OneShot
+# over the locomotion BlendTree so the lower body keeps walking/running.
+var use_layered_anims: bool = true
+var _upper_action_active: bool = false
+var _is_fullbody_action: bool = false # kick uses full body (not filtered)
+
+# --- Upper look (walking punch) - twist spine to face target ---
+var _skeleton: Skeleton3D = null
+var _spine_bone_idx: int = -1
+var _upper_look_weight: float = 0.0
+var _upper_look_angle: float = 0.0
+
+# --- Walk blend smoothing (left <-> right etc) ---
+var _walk_blend_pos: Vector2 = Vector2(0, 1)
+@export_group("Animation Smoothing")
+@export var walk_blend_smoothing: float = 9.0 # higher = snappier response; 9 still smooths left<->right reversals without snapping
+@export var walk_blend_smoothing_idle: float = 14.0 # faster when leaving idle to avoid sluggish first step
+@export var walk_direct_xfade: float = 0.34 # direct AnimationPlayer crossfade for 8-way Walk (left<->right) — longer = no snap
+
 # --- Combo attack (LMB) : Right hook > left punch > Right cross > leg kick ---
 const COMBO_ANIMS: Array[String] = ["punch_hook", "punch_left_simple1", "punch_cross", "kick_spin"]
 const COMBO_BLEND: float = 0.12
@@ -68,7 +88,7 @@ var aim_direction: Vector3 = Vector3.FORWARD
 
 @export_group("Movement")
 @export var walk_speed: float = 2.1 # 105% of 2.0
-@export var walk_anim_speed: float = 1.2 # 120% slow-walk anim speed
+@export var walk_anim_speed: float = 1.25 # 125% walk anim speed
 @export var run_speed: float = 5.0
 @export var jump_strength: float = 15.0
 @export var gravity: float = 50.0
@@ -101,7 +121,7 @@ var _land_anim_timer: float = 0.0
 @export var combo_chain_window: float = 0.22 # how early before end you can queue (s)
 @export var whiff_recovery_mult: float = 1.15 # whiff = longer recovery visual
 
-const ANIMATION_BLEND: float = 7.0
+const ANIMATION_BLEND: float = 5.0 # lower = smoother Idle<->Walk<->Run blend (was 7.0, snapped)
 
 @onready var player_mesh: Node3D = $Mesh
 @onready var spring_arm_pivot: Node3D = $SpringArmPivot
@@ -370,7 +390,7 @@ func _setup_c11_if_present() -> void:
 				if first is Vector3 and last is Vector3:
 					if abs(first.x - last.x) > 0.005 or abs(first.z - last.z) > 0.005:
 						run_anim.track_set_key_value(tidx, cnt - 1, Vector3(first.x, last.y, first.z))
-	ap.playback_default_blend_time = 0.08
+	ap.playback_default_blend_time = 0.18 # smoother crossfade for all walks (was 0.08, snapped)
 	for n in COMBO_ANIMS + ["jump_start", "Landing", "Landing_hard", "pick_up", "pickup", "Pick_up", "PickUp"]:
 		if ap.has_animation(n):
 			ap.get_animation(n).loop_mode = Animation.LOOP_NONE
@@ -378,13 +398,91 @@ func _setup_c11_if_present() -> void:
 		if anim_name.to_lower().begins_with("pick"):
 			ap.get_animation(anim_name).loop_mode = Animation.LOOP_NONE
 	c11_ap = ap
-	c11_use_direct = true
-	if not c11_ap.animation_finished.is_connected(_on_c11_animation_finished):
-		c11_ap.animation_finished.connect(_on_c11_animation_finished)
-	if animator:
-		animator.active = false
-		print("[C11] Direct AnimationPlayer mode enabled, tree disabled. AP: ", get_path_to(ap))
-	_play_c11("Idle")
+	# --- Layered vs Direct mode ---
+	if use_layered_anims and animator:
+		c11_use_direct = false
+		_setup_layered_tree(ap)
+		if not c11_ap.animation_finished.is_connected(_on_c11_animation_finished):
+			c11_ap.animation_finished.connect(_on_c11_animation_finished)
+		print("[C11] Layered AnimationTree mode enabled (upper-body filtered). AP: ", get_path_to(ap))
+	else:
+		c11_use_direct = true
+		if not c11_ap.animation_finished.is_connected(_on_c11_animation_finished):
+			c11_ap.animation_finished.connect(_on_c11_animation_finished)
+		if animator:
+			animator.active = false
+			print("[C11] Direct AnimationPlayer mode enabled, tree disabled. AP: ", get_path_to(ap))
+		_play_c11("Idle")
+
+func _setup_layered_tree(ap: AnimationPlayer) -> void:
+	if animator == null:
+		return
+	# Make tree unique per-instance so filter edits don't leak globally
+	if animator.tree_root:
+		animator.tree_root = animator.tree_root.duplicate(true)
+	animator.anim_player = animator.get_path_to(ap)
+	animator.active = true
+	# Ensure locomotion defaults
+	animator.set("parameters/UpperOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_NONE)
+	animator.set("parameters/UpperScale/scale", 1.0)
+	animator.set("parameters/WalkScale/scale", walk_anim_speed)
+	animator.set("parameters/WalkSpace/blend_mode", 0) # interpolated (inverse-distance) — smooth left<->right strafe, no snap
+	animator.set("parameters/ground_air_transition/transition_request", "grounded")
+	animator.set("parameters/iwr_blend/blend_amount", -1.0)
+	_walk_blend_pos = Vector2(0, 1) # forward default
+	animator.set("parameters/WalkSpace/blend_position", _walk_blend_pos)
+	# Ensure filter is correctly set (re-apply in case duplicate lost it)
+	var upper_node = animator.tree_root.get_node("UpperOneShot")
+	if upper_node and upper_node is AnimationNodeOneShot:
+		upper_node.filter_enabled = true
+
+func _is_upper_action_active() -> bool:
+	if animator and animator.active and use_layered_anims:
+		# OneShot active or internal_active indicates upper anim playing
+		var active = animator.get("parameters/UpperOneShot/active")
+		# internal_active is also a bool param (read-only)
+		if active is bool and active:
+			return true
+	return _upper_action_active and _attack_timer < _attack_total
+
+func _play_upper_action(anim: String, speed_scale: float = 1.0, fadein: float = 0.08, fadeout: float = 0.14) -> void:
+	if c11_ap == null or not c11_ap.has_animation(anim):
+		return
+	if animator == null or not animator.active:
+		_play_c11(anim, fadein, speed_scale)
+		return
+	# Configure the upper leaf animation + time scale
+	var upper_anim_node = animator.tree_root.get_node("UpperAction") as AnimationNodeAnimation
+	if upper_anim_node:
+		upper_anim_node.animation = StringName(anim)
+	animator.set("parameters/UpperScale/scale", speed_scale)
+	var upper_node = animator.tree_root.get_node("UpperOneShot")
+	if upper_node and upper_node is AnimationNodeOneShot:
+		upper_node.fadein_time = fadein
+		upper_node.fadeout_time = fadeout
+		# Kick is always full-body. Punches are full-body when standing, upper-only when moving (as requested)
+		var is_kick: bool = anim == "kick_spin"
+		if is_kick:
+			upper_node.filter_enabled = false
+			_is_fullbody_action = true
+		elif anim in COMBO_ANIMS:
+			# moving if input or velocity indicates locomotion - otherwise standing full-body
+			var ix := Input.get_action_strength("move_right") - Input.get_action_strength("move_left")
+			var iz := Input.get_action_strength("move_backwards") - Input.get_action_strength("move_forwards")
+			var is_moving := Vector2(ix, iz).length() > 0.12 or velocity.length() > 0.12
+			upper_node.filter_enabled = is_moving # moving -> filtered upper only (perfect), standing -> full body head-to-toe
+			_is_fullbody_action = not is_moving
+		else:
+			# pick_up/throw etc keep filtered upper
+			upper_node.filter_enabled = true
+			_is_fullbody_action = false
+	animator.set("parameters/UpperOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_FIRE)
+	_upper_action_active = true
+	# For hitbox timing we still use _attack_timer logic
+	_attack_timer = 0.0
+	_has_hit_this_swing = false
+	_hitbox_active = false
+	c11_current_anim = anim
 
 func _find_animation_player(node: Node) -> AnimationPlayer:
 	if node is AnimationPlayer:
@@ -432,8 +530,11 @@ func _play_attack(idx: int) -> void:
 	# Stop previous hitboxes
 	if hitbox_main: hitbox_main.set("active", false)
 	if hitbox_kick: hitbox_kick.set("active", false)
-	c11_ap.play(anim, COMBO_BLEND, spd)
-	c11_current_anim = anim
+	if use_layered_anims and animator and animator.active:
+		_play_upper_action(anim, spd, COMBO_BLEND, 0.14)
+	else:
+		c11_ap.play(anim, COMBO_BLEND, spd)
+		c11_current_anim = anim
 	# --- Aim FIRST: face the camera crosshair so punches go where you look ---
 	var aim_dir: Vector3 = _compute_aim_dir()
 	if aim_camera and is_instance_valid(aim_camera):
@@ -550,6 +651,117 @@ func _snap_to_target(aim_dir: Vector3) -> void:
 		if dir.length() >= 0.01:
 			face_dir = dir.normalized()
 	player_mesh.rotation.y = atan2(face_dir.x, face_dir.z)
+
+func _get_skeleton() -> Skeleton3D:
+	if _skeleton and is_instance_valid(_skeleton):
+		return _skeleton
+	if player_mesh == null:
+		return null
+	_skeleton = player_mesh.get_node_or_null("C11/root/Skeleton3D") as Skeleton3D
+	if _skeleton == null:
+		_skeleton = _find_skeleton(player_mesh)
+	return _skeleton
+
+func _find_skeleton(node: Node) -> Skeleton3D:
+	if node is Skeleton3D:
+		return node as Skeleton3D
+	for c in node.get_children():
+		var s := _find_skeleton(c)
+		if s:
+			return s
+	return null
+
+func _find_best_target(aim_dir: Vector3) -> Node3D:
+	if aim_dir.length() < 0.1:
+		aim_dir = _compute_aim_dir()
+	var best: Node3D = null
+	var best_ang: float = target_snap_angle
+	var best_dist: float = INF
+	var snap_cone: float = target_snap_angle
+	var candidates: Array[Node] = []
+	candidates.append_array(get_tree().get_nodes_in_group("health"))
+	candidates.append_array(get_tree().get_nodes_in_group("dummy"))
+	candidates.append_array(get_tree().get_nodes_in_group("fighter"))
+	var seen: Dictionary = {}
+	for n in candidates:
+		var body: Node3D = null
+		if n.is_in_group("health"):
+			body = (n as Node).get_parent() as Node3D
+		elif n is Node3D:
+			body = n as Node3D
+		if body == null or body == self or seen.has(body.get_instance_id()):
+			continue
+		seen[body.get_instance_id()] = true
+		var to: Vector3 = body.global_position - global_position
+		var dist: float = to.length()
+		if dist > target_snap_range or dist < 0.4:
+			continue
+		var to_flat: Vector3 = to
+		to_flat.y = 0
+		if to_flat.length() < 0.01:
+			continue
+		to_flat = to_flat.normalized()
+		var ang: float = rad_to_deg(aim_dir.angle_to(to_flat))
+		if ang > snap_cone:
+			continue
+		if ang < best_ang - 0.01 or (abs(ang - best_ang) < 0.01 and dist < best_dist):
+			best_ang = ang
+			best_dist = dist
+			best = body
+	return best
+
+func _update_upper_skeleton_look(delta: float, look_dir: Vector3) -> void:
+	var skel := _get_skeleton()
+	if skel == null:
+		return
+	if _spine_bone_idx == -1:
+		_spine_bone_idx = skel.find_bone("spine_03.x")
+		if _spine_bone_idx == -1:
+			_spine_bone_idx = skel.find_bone("spine_03")
+		if _spine_bone_idx == -1:
+			_spine_bone_idx = skel.find_bone("spine_02.x")
+		if _spine_bone_idx == -1:
+			return
+	look_dir.y = 0
+	if look_dir.length() < 0.01:
+		return
+	look_dir = look_dir.normalized()
+	var mesh_yaw: float = player_mesh.rotation.y
+	var target_yaw: float = atan2(look_dir.x, look_dir.z)
+	var delta_yaw: float = angle_difference(mesh_yaw, target_yaw)
+	delta_yaw = clamp(delta_yaw, deg_to_rad(-65.0), deg_to_rad(65.0))
+	_upper_look_angle = lerp_angle(_upper_look_angle, delta_yaw, delta * 12.0)
+	_upper_look_weight = lerpf(_upper_look_weight, 1.0, delta * 10.0)
+	var q := Quaternion(Vector3.UP, _upper_look_angle * _upper_look_weight)
+	skel.set_bone_pose_rotation(_spine_bone_idx, q)
+	# also drive neck a bit for head look
+	var neck_idx := skel.find_bone("neck.x")
+	if neck_idx != -1:
+		var nq := Quaternion(Vector3.UP, _upper_look_angle * _upper_look_weight * 0.35)
+		skel.set_bone_pose_rotation(neck_idx, nq)
+
+func _clear_upper_skeleton_look(delta: float) -> void:
+	if _upper_look_weight <= 0.01 and _upper_look_angle == 0.0:
+		return
+	_upper_look_weight = lerpf(_upper_look_weight, 0.0, delta * 12.0)
+	_upper_look_angle = lerp_angle(_upper_look_angle, 0.0, delta * 12.0)
+	var skel := _get_skeleton()
+	if skel == null or _spine_bone_idx == -1:
+		return
+	if _upper_look_weight < 0.02:
+		skel.clear_bones_global_pose_override()
+		# reset to rest
+		skel.set_bone_pose_rotation(_spine_bone_idx, Quaternion.IDENTITY)
+		var neck_idx := skel.find_bone("neck.x")
+		if neck_idx != -1:
+			skel.set_bone_pose_rotation(neck_idx, Quaternion.IDENTITY)
+	else:
+		var q := Quaternion(Vector3.UP, _upper_look_angle * _upper_look_weight)
+		skel.set_bone_pose_rotation(_spine_bone_idx, q)
+		var neck_idx := skel.find_bone("neck.x")
+		if neck_idx != -1:
+			var nq := Quaternion(Vector3.UP, _upper_look_angle * _upper_look_weight * 0.35)
+			skel.set_bone_pose_rotation(neck_idx, nq)
 
 func _do_attack_anticipation(idx: int) -> void:
 	if player_mesh == null:
@@ -739,6 +951,8 @@ func _on_damaged(amount: float, from: Node, _kb: Vector3, _is_crit: bool) -> voi
 
 func _on_died(_killer: Node) -> void:
 	is_attacking = false
+	_upper_action_active = false
+	_is_fullbody_action = false
 	combo_queued = false
 	_hitbox_active = false
 	if hitbox_main: hitbox_main.set("active", false)
@@ -793,6 +1007,8 @@ func _respawn_after_death() -> void:
 	velocity = Vector3.ZERO
 	_stun_timer = 0.0
 	is_attacking = false
+	_upper_action_active = false
+	_is_fullbody_action = false
 	combo_queued = false
 	combo_index = 0
 	if health:
@@ -803,7 +1019,11 @@ func _respawn_after_death() -> void:
 		player_mesh.scale = Vector3.ONE
 	if c11_ap:
 		c11_ap.active = true
-		if c11_ap.has_animation("Idle"):
+		if animator and animator.active and use_layered_anims:
+			animator.set("parameters/UpperOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_ABORT)
+			animator.set("parameters/ground_air_transition/transition_request", "grounded")
+			animator.set("parameters/iwr_blend/blend_amount", -1.0)
+		elif c11_ap.has_animation("Idle"):
 			c11_ap.play("Idle", 0.2)
 
 func _do_hurt_flash(is_crit: bool) -> void:
@@ -839,7 +1059,10 @@ func _try_attack() -> void:
 	if _attack_frame == f:
 		return
 	_attack_frame = f
-	if c11_ap == null or not c11_use_direct:
+	if c11_ap == null:
+		return
+	# Allow layered OneShot mode even though c11_use_direct is false
+	if not c11_use_direct and not (use_layered_anims and animator and animator.active):
 		return
 	if not is_on_floor():
 		return
@@ -852,10 +1075,16 @@ func _try_attack() -> void:
 		# Queue window: allow at any time after 15% but earlier queue = buffered, later = immediate
 		var can_queue := true
 		var prog: float = 0.0
-		if c11_ap.current_animation_length > 0.0:
-			prog = c11_ap.current_animation_position / c11_ap.current_animation_length
-			if prog < 0.15:
-				can_queue = false
+		if use_layered_anims and animator and animator.active:
+			if _attack_total > 0.0:
+				prog = _attack_timer / _attack_total
+				if prog < 0.15:
+					can_queue = false
+		else:
+			if c11_ap.current_animation_length > 0.0:
+				prog = c11_ap.current_animation_position / c11_ap.current_animation_length
+				if prog < 0.15:
+					can_queue = false
 		# If hit confirmed, allow instant queue even earlier
 		if _has_hit_this_swing and prog < 0.15:
 			can_queue = true
@@ -865,12 +1094,21 @@ func _try_attack() -> void:
 			combo_queued = true
 
 func _on_c11_animation_finished(anim_name: String) -> void:
+	# Handle pickup
 	if anim_name.to_lower().begins_with("pick") or anim_name.to_lower() == "pick_up" or anim_name.to_lower() == "pickup":
 		is_picking_up = false
+		_upper_action_active = false
+		_is_fullbody_action = false
 		c11_current_anim = ""
-		_play_c11("Idle")
+		if not (use_layered_anims and animator and animator.active):
+			_play_c11("Idle")
 		return
 	if anim_name not in COMBO_ANIMS:
+		# Also clear throw/punch filtered upper when generic upper finishes
+		if anim_name in ["throw", "beam", "Summon", "NO"]:
+			_upper_action_active = false
+			_is_fullbody_action = false
+			c11_current_anim = ""
 		return
 	# Disable hitboxes
 	if hitbox_main: hitbox_main.set("active", false)
@@ -883,6 +1121,8 @@ func _on_c11_animation_finished(anim_name: String) -> void:
 		if anim_name == COMBO_ANIMS[combo_index]:
 			var had_hit: bool = _has_hit_this_swing
 			is_attacking = false
+			_upper_action_active = false
+			_is_fullbody_action = false
 			if combo_index == COMBO_ANIMS.size() - 1:
 				combo_index = 0
 				combo_reset_timer = 0.0
@@ -928,6 +1168,19 @@ func _unhandled_input(event: InputEvent) -> void:
 			if _try_grab_or_pickup():
 				get_viewport().set_input_as_handled()
 				return
+		# Throw (upper-body while walking) with G / Q
+		if event.keycode == KEY_G or event.keycode == KEY_Q:
+			if c11_ap and c11_ap.has_animation("throw"):
+				if not is_picking_up and not (is_attacking and _is_fullbody_action):
+					is_picking_up = true
+					_is_fullbody_action = false
+					_play_upper_action("throw", 1.45, 0.1, 0.12) if use_layered_anims and animator and animator.active else _play_c11("throw", 0.1, 1.45)
+					var tlen: float = c11_ap.get_animation("throw").length / 1.45
+					get_tree().create_timer(tlen + 0.12).timeout.connect(func(): is_picking_up = false)
+					# TODO: spawn projectile / drop logic can be hooked here
+					print("[Upper] throw while moving")
+				get_viewport().set_input_as_handled()
+				return
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not is_picking_up:
 			_try_attack()
@@ -963,8 +1216,15 @@ func _play_grab_pickup_anim() -> void:
 				break
 	if pickup_anim != "" and c11_ap:
 		is_picking_up = true
-		_play_c11(pickup_anim, 0.08, 1.35)
-		# is_picking_up will be cleared by _on_c11_animation_finished when pick* ends
+		_is_fullbody_action = false
+		if use_layered_anims and animator and animator.active:
+			_play_upper_action(pickup_anim, 1.35, 0.08, 0.14)
+			# Clear is_picking_up when upper OneShot finishes (timer based)
+			var ulen: float = c11_ap.get_animation(pickup_anim).length / 1.35
+			get_tree().create_timer(ulen + 0.14).timeout.connect(func(): is_picking_up = false)
+		else:
+			_play_c11(pickup_anim, 0.08, 1.35)
+		# is_picking_up will be cleared by _on_c11_animation_finished when pick* ends (direct) or timer (layered)
 		# Don't block ragdoll carry: allow tiny movement during pick (freeze is handled in _physics_process is_picking_up branch)
 		if player_mesh:
 			var dir := Vector3.ZERO
@@ -977,7 +1237,10 @@ func _play_grab_pickup_anim() -> void:
 						player_mesh.look_at(global_position - dir.normalized(), Vector3.UP)
 
 func _try_interact_pickup() -> bool:
-	if is_picking_up or is_attacking:
+	if is_picking_up:
+		return false
+	# In layered mode, allow pickup while punching (upper queue) — only block if fullbody kick
+	if is_attacking and _is_fullbody_action:
 		return false
 	
 	var best_pickup: Node3D = null
@@ -1016,13 +1279,24 @@ func _try_interact_pickup() -> bool:
 
 	if pickup_anim != "" and c11_ap:
 		is_picking_up = true
-		_play_c11(pickup_anim, 0.1, 1.25)
-		var anim_len: float = c11_ap.get_animation(pickup_anim).length / 1.25
-		var delay: float = clampf(anim_len * 0.45, 0.15, 0.45)
-		get_tree().create_timer(delay).timeout.connect(func():
-			if is_instance_valid(best_pickup) and best_pickup.has_method("try_interact"):
-				best_pickup.call("try_interact", self)
-		)
+		_is_fullbody_action = false
+		if use_layered_anims and animator and animator.active:
+			_play_upper_action(pickup_anim, 1.25, 0.1, 0.14)
+			var anim_len2: float = c11_ap.get_animation(pickup_anim).length / 1.25
+			var delay2: float = clampf(anim_len2 * 0.45, 0.15, 0.45)
+			get_tree().create_timer(delay2).timeout.connect(func():
+				if is_instance_valid(best_pickup) and best_pickup.has_method("try_interact"):
+					best_pickup.call("try_interact", self)
+			)
+			get_tree().create_timer(anim_len2 + 0.14).timeout.connect(func(): is_picking_up = false)
+		else:
+			_play_c11(pickup_anim, 0.1, 1.25)
+			var anim_len: float = c11_ap.get_animation(pickup_anim).length / 1.25
+			var delay: float = clampf(anim_len * 0.45, 0.15, 0.45)
+			get_tree().create_timer(delay).timeout.connect(func():
+				if is_instance_valid(best_pickup) and best_pickup.has_method("try_interact"):
+					best_pickup.call("try_interact", self)
+			)
 	else:
 		if best_pickup.has_method("try_interact"):
 			best_pickup.call("try_interact", self)
@@ -1044,12 +1318,17 @@ func _physics_process(delta: float) -> void:
 		move_and_slide()
 		return
 	if is_picking_up:
-		velocity.x = lerp(velocity.x, 0.0, delta * 14.0)
-		velocity.z = lerp(velocity.z, 0.0, delta * 14.0)
-		if not is_on_floor():
-			velocity.y -= gravity * delta
-		move_and_slide()
-		return
+		# Layered pick_up is upper-body only (filtered) → allow walking while picking
+		if use_layered_anims and animator and animator.active and not _is_fullbody_action:
+			# Allow slow walk while upper pickup plays — just reduce speed, don't freeze
+			pass
+		else:
+			velocity.x = lerp(velocity.x, 0.0, delta * 14.0)
+			velocity.z = lerp(velocity.z, 0.0, delta * 14.0)
+			if not is_on_floor():
+				velocity.y -= gravity * delta
+			move_and_slide()
+			return
 	if Input.is_action_just_pressed("punch") and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_try_attack()
 	# ---- Aiming (hold RMB) ---- 
@@ -1076,6 +1355,21 @@ func _physics_process(delta: float) -> void:
 			print("[Combo] reset (timeout)")
 	# Attack hitbox windowing
 	_update_attack_hitbox(delta)
+	# Layered combo timer finish (AnimationTree OneShot doesn't emit animation_finished reliably)
+	if use_layered_anims and animator and animator.active and is_attacking:
+		if _attack_timer >= _attack_total:
+			# avoid double firing if signal already handled this frame
+			if c11_current_anim in COMBO_ANIMS:
+				var _fin_idx := COMBO_ANIMS.find(c11_current_anim)
+				# only fire if this is the current combo_index anim (prevents stale)
+				if _fin_idx == combo_index:
+					_on_c11_animation_finished(c11_current_anim)
+	# Also ensure is_attacking can restart after timer if somehow stuck (fallback)
+	if use_layered_anims and animator and animator.active and is_attacking and _attack_timer > _attack_total + 0.05:
+		# force clear if still stuck
+		is_attacking = false
+		_upper_action_active = false
+		_is_fullbody_action = false
 	# Lunge decay
 	if _lunge_velocity.length() > 0.01:
 		_lunge_velocity = _lunge_velocity.lerp(Vector3.ZERO, attack_lunge_decay * delta)
@@ -1092,7 +1386,9 @@ func _physics_process(delta: float) -> void:
 	if spring_arm_pivot:
 		move_direction = move_direction.rotated(Vector3.UP, spring_arm_pivot.rotation.y)
 	# ---- Speed toggle ----
-	var is_sprinting: bool = Input.is_action_pressed("run") and not is_attacking and _stun_timer <= 0.0 and not is_aiming
+	# In layered mode, allow sprint/walk while upper punch is active (only block for fullbody kick)
+	var block_sprint := is_attacking and (_is_fullbody_action or not use_layered_anims)
+	var is_sprinting: bool = Input.is_action_pressed("run") and not block_sprint and _stun_timer <= 0.0 and not is_aiming
 	var grab_slow: float = 0.68 if (grabber and grabber.is_grabbing()) else 1.0
 	if is_sprinting:
 		speed = run_speed * grab_slow
@@ -1129,7 +1425,9 @@ func _physics_process(delta: float) -> void:
 		velocity.x += _lunge_velocity.x * delta * 11.0
 		velocity.z += _lunge_velocity.z * delta * 11.0
 	# Damp movement while attacking (but lunge overrides) — if no lunge, heavy damp
-	if is_attacking and _lunge_velocity.length() < 0.2:
+	# For layered upper punches, don't damp — let lower body walk/run freely
+	var should_damp := is_attacking and _lunge_velocity.length() < 0.2 and (_is_fullbody_action or not use_layered_anims)
+	if should_damp:
 		velocity.x *= 0.42
 		velocity.z *= 0.42
 	# Stun clamp
@@ -1140,23 +1438,59 @@ func _physics_process(delta: float) -> void:
 	const YAW_OFFSET: float = PI # Mesh has flip Transform3D(-1) so +PI makes visual back to camera (away)
 	if player_mesh and spring_arm_pivot:
 		var has_input: bool = move_direction.length() > 0.1
-		# During attack, lock to attack direction (no strafe snap)
-		if is_attacking:
-			# keep current facing, slight lerp to maintain
-			pass
-		elif is_aiming:
-			# Face the crosshair aim direction while aiming
-			var aim_yaw: float = atan2(aim_direction.x, aim_direction.z)
-			player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, aim_yaw, strafe_rotation_speed * delta)
-		elif is_sprinting and has_input:
-			var target_angle := atan2(move_direction.x, move_direction.z)
-			player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, target_angle, sprint_rotation_speed * delta)
-		else:
-			var cam_yaw := spring_arm_pivot.rotation.y + YAW_OFFSET
-			if instant_strafe_lock:
-				player_mesh.rotation.y = cam_yaw
+		var is_sprinting_now := Input.is_action_pressed("run") and velocity.length() > 0.5 and not is_aiming
+		if is_attacking and _is_fullbody_action:
+			# Standing / kick - full body faces target (head-to-toe)
+			var aim_dir_full := _compute_aim_dir()
+			if aim_camera and is_instance_valid(aim_camera):
+				aim_dir_full = _aim_dir_from_point(_compute_aim_point())
+			_snap_to_target(aim_dir_full)
+			_clear_upper_skeleton_look(delta)
+		elif is_attacking and not _is_fullbody_action:
+			if is_sprinting_now:
+				# Running has no walk+punch blend - keep sprint facing, no upper snap (as requested)
+				_clear_upper_skeleton_look(delta)
+				if has_input:
+					var target_angle := atan2(move_direction.x, move_direction.z)
+					player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, target_angle, sprint_rotation_speed * delta)
+				else:
+					var cam_yaw2 := spring_arm_pivot.rotation.y + YAW_OFFSET
+					player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, cam_yaw2, strafe_rotation_speed * delta)
 			else:
-				player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, cam_yaw, strafe_rotation_speed * delta)
+				# Walking filtered - keep mesh strafe-locked (legs walk where you input) but twist upper spine to target
+				var aim_dir_up := _compute_aim_dir()
+				if aim_camera and is_instance_valid(aim_camera):
+					aim_dir_up = _aim_dir_from_point(_compute_aim_point())
+				var look_target := _find_best_target(aim_dir_up)
+				var look_dir: Vector3 = aim_dir_up
+				if look_target:
+					look_dir = (look_target.global_position - global_position)
+					look_dir.y = 0
+					if look_dir.length() < 0.01:
+						look_dir = aim_dir_up
+					else:
+						look_dir = look_dir.normalized()
+				_update_upper_skeleton_look(delta, look_dir)
+				# Mesh stays facing camera, so WalkSpace handles leg direction
+				var cam_yaw3 := spring_arm_pivot.rotation.y + YAW_OFFSET
+				if instant_strafe_lock:
+					player_mesh.rotation.y = cam_yaw3
+				else:
+					player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, cam_yaw3, strafe_rotation_speed * delta)
+		else:
+			_clear_upper_skeleton_look(delta)
+			if is_aiming:
+				var aim_yaw: float = atan2(aim_direction.x, aim_direction.z)
+				player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, aim_yaw, strafe_rotation_speed * delta)
+			elif is_sprinting_now and has_input:
+				var target_angle := atan2(move_direction.x, move_direction.z)
+				player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, target_angle, sprint_rotation_speed * delta)
+			else:
+				var cam_yaw := spring_arm_pivot.rotation.y + YAW_OFFSET
+				if instant_strafe_lock:
+					player_mesh.rotation.y = cam_yaw
+				else:
+					player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, cam_yaw, strafe_rotation_speed * delta)
 	# ---- Keep hitbox in front of character, rotate with mesh (world-correct side) ---
 	if hitbox_main and player_mesh:
 		var fwd: Vector3 = player_mesh.global_basis.z
@@ -1181,7 +1515,8 @@ func _physics_process(delta: float) -> void:
 			hitbox_kick.position = Vector3(world_off_kick.x, 0.42, world_off_kick.z)
 	# ---- Jump / snap ----
 	var just_landed: bool = is_on_floor() and not was_on_floor
-	var can_jump := coyote_timer > 0.0 and jump_buffer_timer > 0.0 and not is_attacking and _stun_timer <= 0.0
+	var block_jump := is_attacking and (_is_fullbody_action or not use_layered_anims)
+	var can_jump := coyote_timer > 0.0 and jump_buffer_timer > 0.0 and not block_jump and _stun_timer <= 0.0
 	if Input.is_action_just_released("jump") and velocity.y > 2.0:
 		velocity.y *= jump_cut_multiplier
 	if can_jump:
@@ -1270,6 +1605,16 @@ func _do_squash(sx: float, sy: float, dur: float) -> void:
 func _play_jump_anim() -> void:
 	if c11_ap == null:
 		return
+	if use_layered_anims and animator and animator.active:
+		if c11_ap.has_animation("jump_start"):
+			_play_upper_action("jump_start", 1.35, 0.06, 0.08)
+			var n = animator.tree_root.get_node("UpperOneShot")
+			if n: n.filter_enabled = false
+			_is_fullbody_action = true
+			_jump_anim_timer = 0.28
+			return
+		_jump_anim_timer = 0.28
+		return
 	if c11_ap.has_animation("jump_start"):
 		c11_ap.play("jump_start", 0.06, 1.35)
 		c11_current_anim = "jump_start"
@@ -1284,12 +1629,85 @@ func _play_land_anim(power: float) -> void:
 	if not c11_ap.has_animation(anim):
 		anim = "Landing" if c11_ap.has_animation("Landing") else "Idle"
 	if c11_ap.has_animation(anim):
+		if use_layered_anims and animator and animator.active:
+			var spd2 := 1.35 if power < 0.65 else 1.1
+			_play_upper_action(anim, spd2, 0.06, 0.1)
+			var n2 = animator.tree_root.get_node("UpperOneShot")
+			if n2: n2.filter_enabled = false
+			_is_fullbody_action = true
+			_land_anim_timer = 0.32 if power < 0.65 else 0.42
+			return
 		var spd := 1.35 if power < 0.65 else 1.1
 		c11_ap.play(anim, 0.06, spd)
 		c11_current_anim = anim
 		_land_anim_timer = 0.32 if power < 0.65 else 0.42
 
+func play_throw() -> void:
+	if c11_ap == null or not c11_ap.has_animation("throw"):
+		return
+	if is_picking_up:
+		return
+	_is_fullbody_action = false
+	_play_upper_action("throw", 1.45, 0.1, 0.12) if use_layered_anims and animator and animator.active else _play_c11("throw", 0.1, 1.45)
+
+func play_pick_throw_combo(anim_name: String, speed: float = 1.25) -> void:
+	if c11_ap == null or not c11_ap.has_animation(anim_name):
+		return
+	_is_fullbody_action = false
+	if use_layered_anims and animator and animator.active:
+		_play_upper_action(anim_name, speed)
+	else:
+		_play_c11(anim_name, 0.1, speed)
+
 func animate(delta: float) -> void:
+	# --- Layered mode: lower body always follows locomotion, upper via OneShot ---
+	if use_layered_anims and animator and animator.active:
+		# Keep all WalkSpace animations at walk_anim_speed (125%) without touching movement speed
+		animator.set("parameters/WalkScale/scale", walk_anim_speed)
+		# Don't block locomotion during upper punch/pickup/throw — only fullbody kick blocks slightly
+		if is_on_floor():
+			animator.set("parameters/ground_air_transition/transition_request", "grounded")
+			if velocity.length() > 0.1:
+				if speed == run_speed and Input.is_action_pressed("run"):
+					animator.set("parameters/iwr_blend/blend_amount", lerp(animator.get("parameters/iwr_blend/blend_amount"), 1.0, delta * ANIMATION_BLEND))
+				else:
+					# Slow walk — keep direction anim but still locomote while punching
+					# For upper-body punches we keep a simple Walk blend so legs keep stepping
+					# Use -1..0..1 blend: -1 idle, 0 walk, 1 run . While carrying upper, still 0 for walk.
+					var target_blend: float = 0.0
+					if velocity.length() < 0.1:
+						target_blend = -1.0
+					elif speed == run_speed and Input.is_action_pressed("run"):
+						target_blend = 1.0
+					animator.set("parameters/iwr_blend/blend_amount", lerp(animator.get("parameters/iwr_blend/blend_amount"), target_blend, delta * ANIMATION_BLEND))
+			else:
+				animator.set("parameters/iwr_blend/blend_amount", lerp(animator.get("parameters/iwr_blend/blend_amount"), -1.0, delta * ANIMATION_BLEND))
+			# 8-way directional walk: smoothed BlendSpace2D — lerps left<->right etc for smooth strafe
+			var ix := Input.get_action_strength("move_right") - Input.get_action_strength("move_left")
+			var iz := Input.get_action_strength("move_backwards") - Input.get_action_strength("move_forwards")
+			var walk_pos := Vector2(ix, -iz) # X strafe, Y forward positive -> matches WalkSpace points at (±1,±1)
+			# Framerate-independent exponential smoothing (no popping at variable framerates)
+			# t = 1 - exp(-k*dt); k = blend_speed (1/s). Critically damped feel.
+			# Faster when starting from idle (input magnitude ramping up) to avoid sluggish first step.
+			var input_strength: float = walk_pos.length()
+			var was_idle: bool = _walk_blend_pos.length() < 0.18
+			var k: float = walk_blend_smoothing_idle if (was_idle and input_strength > 0.3) else walk_blend_smoothing
+			# Use exponential smoothing per-axis; clamps to 1.0 so framerate spikes can't overshoot
+			var t: float = 1.0 - exp(-k * delta)
+			t = clamp(t, 0.0, 1.0)
+			_walk_blend_pos = _walk_blend_pos.lerp(walk_pos, t)
+			# snap to target when very close to prevent endless micro-lerp
+			if _walk_blend_pos.distance_to(walk_pos) < 0.015:
+				_walk_blend_pos = walk_pos
+			animator.set("parameters/WalkSpace/blend_position", _walk_blend_pos)
+		else:
+			animator.set("parameters/ground_air_transition/transition_request", "air")
+		# Sync OneShot active flag for is_attacking logic
+		if animator.get("parameters/UpperOneShot/active") == false and _upper_action_active:
+			# OneShot finished -> clear timers similar to _on_c11_animation_finished
+			if _attack_timer >= _attack_total - 0.08:
+				_upper_action_active = false
+		return
 	if is_attacking:
 		return
 	if c11_use_direct and c11_ap:
@@ -1304,7 +1722,7 @@ func animate(delta: float) -> void:
 				else:
 					var walk_anim := _get_slow_walk_anim()
 					var s_spd := walk_anim_speed if walk_anim != "Idle" else 1.0
-					_play_c11(walk_anim, 0.2, s_spd)
+					_play_c11(walk_anim, walk_direct_xfade, s_spd)
 			else:
 				_play_c11("Idle")
 		else:
