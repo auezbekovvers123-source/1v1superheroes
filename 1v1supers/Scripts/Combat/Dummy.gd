@@ -1,6 +1,7 @@
 extends CharacterBody3D
 const HealthCls = preload("res://Scripts/Combat/Health.gd")
 const HurtboxCls = preload("res://Scripts/Combat/Hurtbox3D.gd")
+const RagdollCls = preload("res://Scripts/Combat/RagdollController.gd")
 ## Dummy.gd — training dummy / opponent. Takes hits satisfyingly, shows health bar, respawns.
 ## Shares C11 model for visual parity. No input — gravity + knockback + stun + flinch.
 
@@ -13,12 +14,14 @@ const HurtboxCls = preload("res://Scripts/Combat/Hurtbox3D.gd")
 var health: Node
 var hurtbox: Area3D
 var c11_ap: AnimationPlayer = null
+var ragdoll: RagdollController = null
 var _stun_timer: float = 0.0
 var _respawn_pos: Vector3
 var _respawn_yaw: float = 0.0
 var _mesh: Node3D
 var _health_bar: ProgressBar
 var _bar_host: Control
+var _respawn_lock: float = 0.0
 
 func _ready() -> void:
 	add_to_group("dummy")
@@ -29,12 +32,23 @@ func _ready() -> void:
 	_setup_health()
 	_setup_c11_anim()
 	_setup_health_bar()
+	_setup_ragdoll()
 	if health:
 		health.damaged.connect(_on_damaged)
 		health.died.connect(_on_died)
 	# Ensure collision layer 1
 	collision_layer = 1
 	collision_mask = 1
+
+func _setup_ragdoll() -> void:
+	var existing = get_node_or_null("RagdollController")
+	if existing and existing is RagdollController:
+		ragdoll = existing as RagdollController
+		return
+	ragdoll = RagdollCls.new()
+	ragdoll.name = "RagdollController"
+	ragdoll.impulse_multiplier = 1.45
+	add_child(ragdoll)
 
 func _setup_health() -> void:
 	var h = get_node_or_null("Health")
@@ -157,6 +171,28 @@ func _update_health_bar() -> void:
 
 func _physics_process(delta: float) -> void:
 	_update_health_bar()
+	# GTA ragdoll: if ragdolled, let physical bones drive — don't apply CharacterBody gravity
+	if ragdoll and ragdoll.is_ragdolled():
+		# Still update health bar but freeze body motion — also pin to death pos so ragdoll doesn't inherit CharacterBody slide
+		velocity = Vector3.ZERO
+		return
+	# Respawn lock — HARD pin after teleport to prevent any slide/teleport glitch (physics settle)
+	if _respawn_lock > 0.0:
+		_respawn_lock -= delta
+		velocity = Vector3.ZERO
+		# Keep snapped to spawn pos (no gravity) for the lock duration — also zero any external pushes
+		global_position = _respawn_pos
+		# Keep collision disabled during first half of lock to avoid depenetration push from floor/wall
+		var cs := get_node_or_null("CollisionShape3D") as CollisionShape3D
+		if cs:
+			cs.disabled = _respawn_lock > 0.25
+		# Don't call move_and_slide while locked — keeps physics from adding slide
+		return
+	else:
+		# Ensure collision is enabled after lock
+		var cs2 := get_node_or_null("CollisionShape3D") as CollisionShape3D
+		if cs2 and cs2.disabled:
+			cs2.disabled = false
 	if health and health.is_dead:
 		velocity.x = lerp(velocity.x, 0.0, delta * 2.0)
 		velocity.z = lerp(velocity.z, 0.0, delta * 2.0)
@@ -225,29 +261,88 @@ func _do_hit_flash(is_crit: bool, amount: float) -> void:
 	tw2.tween_callback(func(): if is_instance_valid(flash): flash.queue_free())
 
 func _on_died(_killer: Node) -> void:
-	_play("falling_idle" if c11_ap and c11_ap.has_animation("falling_idle") else "Idle", 0.08)
 	_stun_timer = 999.0
-	# Knockdown scale
-	if _mesh:
-		var tw := create_tween()
-		tw.tween_property(_mesh, "scale", Vector3(1.18, 0.68, 1.18), 0.14)
-	# Respawn timer handled in Health, but also reset here
-	var t := get_tree().create_timer(respawn_time)
-	t.timeout.connect(func():
-		if is_instance_valid(self) and health:
-			# Health already respawns, just reset motion
-			respawn()
-	)
+	if ragdoll == null:
+		_setup_ragdoll()
+	if ragdoll:
+		var dir: Vector3 = Vector3.ZERO
+		var pos: Vector3 = global_position + Vector3(0, 0.9, 0)
+		var strength: float = 7.0
+		if _killer is Node3D and _killer != self:
+			dir = (global_position - (_killer as Node3D).global_position)
+			dir.y = 0.18
+			if dir.length() < 0.1:
+				dir = Vector3.FORWARD
+			dir = dir.normalized()
+			if _killer is CharacterBody3D:
+				var kv: Vector3 = (_killer as CharacterBody3D).velocity
+				if kv.length() > 1.0:
+					dir = (dir + kv.normalized()*0.5).normalized()
+					strength += kv.length() * 0.22
+			# Use last knockback from Health if available (more accurate)
+			if health and health.get("_last_knockback") != null:
+				var kb: Vector3 = health.get("_last_knockback")
+				if kb.length() > 0.5:
+					dir = kb.normalized()
+					strength = kb.length() * 0.9 + 5.0
+		else:
+			dir = Vector3(randf_range(-1,1), 0.18, randf_range(-1,1)).normalized()
+		ragdoll.start_ragdoll(dir, pos, strength)
+		# Also play falling anim before ragdoll takes over? No, ragdoll freezes anim
+	else:
+		_play("falling_idle" if c11_ap and c11_ap.has_animation("falling_idle") else "Idle", 0.08)
+		if _mesh:
+			var tw := create_tween()
+			tw.tween_property(_mesh, "scale", Vector3(1.18, 0.68, 1.18), 0.14)
+	# Respawn is handled solely by Health._do_death_effect to avoid double timers
+	# (previously this and Health both scheduled respawn causing double teleport + slide)
 
 func respawn() -> void:
+	# Guard against double respawn (Health and _on_died both used to schedule)
+	if not health.is_dead and not (ragdoll and ragdoll.is_ragdolled()):
+		# Already respawned, ignore duplicate call
+		return
+	# Stop ragdoll first so skeleton returns to animated control BEFORE teleport
+	# Important: keep CollisionShape disabled during the teleport to avoid physics depenetration push
+	var cs := get_node_or_null("CollisionShape3D") as CollisionShape3D
+	if cs:
+		cs.disabled = true
+	if ragdoll and ragdoll.is_ragdolled():
+		ragdoll.reset_ragdoll()
+		# Ragdoll reset re-enables collision — disable again for the teleport lock phase
+		if cs:
+			cs.disabled = true
+	# Also zero any pending physics state that could cause slide
 	_stun_timer = 0.0
 	velocity = Vector3.ZERO
+	# Snap position without interpolation artifacts — reset physics state
 	global_position = _respawn_pos
 	rotation.y = _respawn_yaw
+	# Clear velocity again after teleport
+	velocity = Vector3.ZERO
+	# Pin for a longer time after respawn to let physics fully settle and avoid slide/teleport
+	_respawn_lock = 0.85
 	if _mesh:
 		_mesh.scale = Vector3.ONE
+		# Reset skeleton pose explicitly (ragdoll may have left bones offset)
+		var skel := get_node_or_null("Mesh/C11/root/Skeleton3D") as Skeleton3D
+		if skel == null:
+			skel = _find_skeleton_for_reset()
+		if skel:
+			# Zero any leftover bone velocities again (ragdoll may have set them)
+			for child in skel.get_children():
+				if child is PhysicalBone3D:
+					var pb := child as PhysicalBone3D
+					pb.linear_velocity = Vector3.ZERO
+					pb.angular_velocity = Vector3.ZERO
+			if skel.has_method("reset_bone_poses"):
+				skel.reset_bone_poses()
+			elif skel.has_method("clear_bones_global_pose_override"):
+				skel.clear_bones_global_pose_override()
+			if skel.has_method("force_update_bone_child_transforms"):
+				skel.force_update_bone_child_transforms()
 	_play("Idle", 0.12)
-	# Brief spawn flash
+	# Spawn flash
 	if _mesh:
 		var flash := MeshInstance3D.new()
 		var sph := SphereMesh.new()
@@ -265,3 +360,21 @@ func respawn() -> void:
 		tw.tween_property(flash, "scale", Vector3(2.2, 2.2, 2.2), 0.28)
 		tw.parallel().tween_property(mat, "albedo_color:a", 0.0, 0.28)
 		tw.tween_callback(func(): if is_instance_valid(flash): flash.queue_free())
+	# Ensure Health invuln briefly to prevent instant re-hit slide
+	if health:
+		health.set("_invuln_timer", 0.65)
+	# Debug — if still slides, will print velocity/pos next frames
+	#print("[Dummy] respawn at ", global_position, " vel ", velocity, " lock ", _respawn_lock)
+
+func _find_skeleton_for_reset() -> Skeleton3D:
+	# helper to locate skeleton without depending on ragdoll
+	var m := get_node_or_null("Mesh")
+	if m:
+		for c in m.get_children():
+			var sk := c.get_node_or_null("root/Skeleton3D") as Skeleton3D
+			if sk:
+				return sk
+			sk = c.find_child("Skeleton3D", true, false) as Skeleton3D
+			if sk:
+				return sk
+	return null

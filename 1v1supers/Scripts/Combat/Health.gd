@@ -17,6 +17,8 @@ var current: float = 100.0
 var is_dead: bool = false
 var _invuln_timer: float = 0.0
 var _flash_tween: Tween
+var _last_knockback: Vector3 = Vector3.ZERO
+var _last_hit_dir: Vector3 = Vector3.ZERO
 
 @onready var _owner_body: CharacterBody3D = get_parent() as CharacterBody3D
 
@@ -41,8 +43,15 @@ func take_damage(amount: float, from: Node = null, knockback: Vector3 = Vector3.
 	_invuln_timer = invuln_time
 	health_changed.emit(current, max_health)
 	var is_crit := amount >= 18.0
-	# Apply knockback to owner if CharacterBody3D
-	if _owner_body and knockback != Vector3.ZERO:
+	_last_knockback = knockback
+	_last_hit_dir = knockback.normalized() if knockback.length() > 0.01 else Vector3.ZERO
+	# Apply knockback to owner if CharacterBody3D — but skip if already ragdolled (physics bones own motion)
+	var is_ragdolled: bool = false
+	if _owner_body and _owner_body.has_node("RagdollController"):
+		var rc = _owner_body.get_node("RagdollController")
+		if rc and rc.has_method("is_ragdolled") and rc.is_ragdolled():
+			is_ragdolled = true
+	if _owner_body and knockback != Vector3.ZERO and not is_ragdolled:
 		_owner_body.velocity += knockback
 		# brief stun: add meta
 		_owner_body.set_meta("stun_time", 0.22 if is_crit else 0.14)
@@ -227,13 +236,19 @@ func _do_death_effect(_killer: Node) -> void:
 	if col:
 		# keep collision but maybe
 		pass
-	# For player, respawn after delay
+	# For player, respawn after delay — delegate to body if it has ragdoll-aware respawn
 	if body.is_in_group("dummy") or body.name.contains("Dummy"):
-		var t := body.get_tree().create_timer(1.4)
+		var respawn_delay: float = 3.2 # longer so GTA ragdoll can settle and flop
+		if body.has_method("get") and body.get("respawn_time") != null:
+			respawn_delay = float(body.get("respawn_time"))
+			# Clamp to at least 2.5 for ragdoll visibility
+			respawn_delay = max(respawn_delay, 2.5)
+		var t := body.get_tree().create_timer(respawn_delay)
 		t.timeout.connect(func():
 			if is_instance_valid(body):
 				current = max_health
 				is_dead = false
+				_last_knockback = Vector3.ZERO
 				if body.has_method("respawn"):
 					body.respawn()
 				else:
@@ -241,13 +256,22 @@ func _do_death_effect(_killer: Node) -> void:
 				health_changed.emit(current, max_health)
 		)
 	else:
-		# player death: slight time slow + respawn after 1.2s at y+2
-		var t2 := body.get_tree().create_timer(1.2)
+		# player death: slight time slow + respawn after 2.5s at y+2 (let ragdoll flop like GTA)
+		var pd: float = 2.8
+		var t2 := body.get_tree().create_timer(pd)
 		t2.timeout.connect(func():
 			if is_instance_valid(body):
 				current = max_health
 				is_dead = false
-				body.global_position = Vector3(0, 2.2, 0)
-				body.velocity = Vector3.ZERO
+				_last_knockback = Vector3.ZERO
+				if body.has_method("_respawn_after_death"):
+					body.call("_respawn_after_death")
+				else:
+					if body.has_node("RagdollController"):
+						var rc = body.get_node("RagdollController")
+						if rc and rc.has_method("reset_ragdoll"):
+							rc.reset_ragdoll()
+					body.global_position = Vector3(0, 2.2, 0)
+					body.velocity = Vector3.ZERO
 				health_changed.emit(current, max_health)
 		)

@@ -5,6 +5,7 @@ const HitboxCls = preload("res://Scripts/Combat/Hitbox3D.gd")
 const CloakScene = preload("res://Scenes/Items/Cloak.tscn")
 const EquipmentCls = preload("res://Scripts/Item/Equipment.gd")
 const InventoryCls = preload("res://Scripts/Item/Inventory.gd")
+const RagdollCls = preload("res://Scripts/Combat/RagdollController.gd")
 ## Player.gd — Third-person CharacterBody3D controller + SATISFYING COMBAT
 ## Features:
 ##  - Over-the-shoulder camera via SpringArmPivot (Node3D) + SpringArm3D + Camera3D
@@ -111,6 +112,7 @@ var health: Node
 var hurtbox: Area3D
 var hitbox_main: Area3D
 var hitbox_kick: Area3D
+var ragdoll: RagdollController = null
 
 # Wearable / Equipment
 var equipment: Equipment = null
@@ -129,6 +131,7 @@ func _ready() -> void:
 	if health:
 		health.damaged.connect(_on_damaged)
 		health.died.connect(_on_died)
+	_setup_ragdoll()
 	_setup_wearables()
 
 func _setup_combat_nodes() -> void:
@@ -212,6 +215,16 @@ func _setup_combat_nodes() -> void:
 	# Ensure collision layer for body
 	collision_layer = 1
 	collision_mask = 1
+
+func _setup_ragdoll() -> void:
+	var existing = get_node_or_null("RagdollController")
+	if existing and existing is RagdollController:
+		ragdoll = existing as RagdollController
+		return
+	ragdoll = RagdollCls.new()
+	ragdoll.name = "RagdollController"
+	ragdoll.impulse_multiplier = 1.35
+	add_child(ragdoll)
 
 func _setup_wearables() -> void:
 	# Equipment manager
@@ -715,11 +728,60 @@ func _on_died(_killer: Node) -> void:
 	_hitbox_active = false
 	if hitbox_main: hitbox_main.set("active", false)
 	if hitbox_kick: hitbox_kick.set("active", false)
-	# Ragdoll-ish: push down scale
+	# --- GTA5 ragdoll ---
+	if ragdoll == null:
+		_setup_ragdoll()
+	if ragdoll:
+		var dir: Vector3 = Vector3.ZERO
+		var pos: Vector3 = global_position + Vector3(0, 0.9, 0)
+		var stren: float = 7.5
+		if _killer is Node3D and _killer != self:
+			dir = (global_position - (_killer as Node3D).global_position)
+			dir.y = 0.22
+			if dir.length() < 0.1:
+				dir = Vector3.FORWARD
+			dir = dir.normalized()
+			if _killer is CharacterBody3D:
+				var kv: Vector3 = (_killer as CharacterBody3D).velocity
+				if kv.length() > 1.0:
+					dir = (dir + kv.normalized()*0.5).normalized()
+					stren += kv.length() * 0.25
+		else:
+			dir = Vector3(randf_range(-1,1), 0.22, randf_range(-1,1)).normalized()
+		# Also add last knockback if available via health
+		if health and health.has_method("get") and health.get("_last_knockback") != null:
+			var kb: Vector3 = health.get("_last_knockback")
+			if kb.length() > 0.5:
+				dir = kb.normalized()
+				stren = kb.length() * 0.9 + 5.0
+		ragdoll.start_ragdoll(dir, pos, stren)
+	else:
+		# Fallback scale tween if ragdoll missing
+		if player_mesh:
+			var tw := create_tween()
+			tw.tween_property(player_mesh, "scale", Vector3(1.15, 0.75, 1.15), 0.15)
+			tw.tween_property(player_mesh, "scale", Vector3.ONE, 0.4)
+
+func _respawn_after_death() -> void:
+	# Called by Health after timer — reset ragdoll before teleport
+	if ragdoll and ragdoll.is_ragdolled():
+		ragdoll.reset_ragdoll()
+	global_position = Vector3(0, 2.2, 0)
+	velocity = Vector3.ZERO
+	_stun_timer = 0.0
+	is_attacking = false
+	combo_queued = false
+	combo_index = 0
+	if health:
+		health.current = health.max_health
+		health.is_dead = false
+		health._invuln_timer = 0.35
 	if player_mesh:
-		var tw := create_tween()
-		tw.tween_property(player_mesh, "scale", Vector3(1.15, 0.75, 1.15), 0.15)
-		tw.tween_property(player_mesh, "scale", Vector3.ONE, 0.4)
+		player_mesh.scale = Vector3.ONE
+	if c11_ap:
+		c11_ap.active = true
+		if c11_ap.has_animation("Idle"):
+			c11_ap.play("Idle", 0.2)
 
 func _do_hurt_flash(is_crit: bool) -> void:
 	if player_mesh == null:
@@ -901,6 +963,19 @@ func _try_interact_pickup() -> bool:
 	return true
 
 func _physics_process(delta: float) -> void:
+	# GTA ragdoll: if ragdolled, skip all player movement/attack logic and let physics bones control collision
+	if ragdoll and ragdoll.is_ragdolled():
+		# Keep velocity zero; physics bones simulate the body. We still need gravity? Ragdoll handles it via PhysicalBones.
+		# Freeze CharacterBody motion so it doesn't slide; ragdoll bones are separate PhysicsBody3Ds
+		velocity = Vector3.ZERO
+		return
+	if health and health.is_dead:
+		# Dead but not yet ragdolled (fallback) — no movement
+		velocity.x = lerp(velocity.x, 0.0, delta * 6.0)
+		velocity.z = lerp(velocity.z, 0.0, delta * 6.0)
+		velocity.y -= gravity * delta
+		move_and_slide()
+		return
 	if is_picking_up:
 		velocity.x = lerp(velocity.x, 0.0, delta * 14.0)
 		velocity.z = lerp(velocity.z, 0.0, delta * 14.0)
