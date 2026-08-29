@@ -1,0 +1,8 @@
+[gd_scene format=3 uid="uid://cn44u7hendujf"]
+
+[ext_resource type="PackedScene" uid="uid://dap8k3l2m4n5o" path="res://Scenes/Items/CloakPickup.tscn" id="1_cge1b"]
+
+[node name="CloakPickup" unique_id=2099853923 instance=ExtResource("1_cge1b")]
+
+[node name="PickupMesh" parent="." index="1"]
+transform = Transform3D(0.145, 0, 0, 0, 0.145, 0, 0, 0, 0.145, 0, 0.7, 0)

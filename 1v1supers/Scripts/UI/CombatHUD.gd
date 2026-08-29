@@ -8,6 +8,7 @@ var hp_bar: ProgressBar
 var hp_label: Label
 var instruction: Label
 var hit_marker: Control
+var cross: Label
 
 func _ready() -> void:
 	# Build UI programmatically (no scene needed)
@@ -16,14 +17,15 @@ func _ready() -> void:
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(root)
 
-	# Crosshair / reticle
-	var cross := Label.new()
+	# Crosshair / reticle (only visible while aiming)
+	cross = Label.new()
 	cross.text = "·"
 	cross.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	cross.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	cross.position = get_viewport().get_visible_rect().size / 2 - Vector2(8, 12)
-	cross.add_theme_font_size_override("font_size", 28)
-	cross.modulate = Color(1,1,1,0.85)
+	cross.add_theme_font_size_override("font_size", 36)
+	cross.modulate = Color(1,1,1,1)
+	cross.visible = false
 	root.add_child(cross)
 
 	# HP bar
@@ -67,7 +69,7 @@ func _ready() -> void:
 	# Instructions
 	instruction = Label.new()
 	instruction.position = Vector2(18, get_viewport().get_visible_rect().size.y - 56)
-	instruction.text = "LMB: Punch combo (4 hits)  |  SHIFT: Sprint  |  WASD: Move  |  SPACE: Jump  |  ESC: Unlock mouse"
+	instruction.text = "LMB: Punch (aims at crosshair)  |  RMB: Aim  |  SHIFT: Sprint  |  WASD: Move  |  SPACE: Jump  |  F: Pick up  |  TAB: Inventory  |  ESC: Unlock mouse"
 	instruction.add_theme_font_size_override("font_size", 13)
 	instruction.modulate = Color(1,1,1,0.78)
 	root.add_child(instruction)
@@ -110,6 +112,10 @@ func _on_hp(cur: float, maxv: float) -> void:
 func _process(_delta: float) -> void:
 	if player == null:
 		return
+	# Crosshair appears only while aiming
+	var aiming: bool = player.get("is_aiming") if player.get("is_aiming") != null else false
+	if cross:
+		cross.visible = aiming
 	# Combo display
 	var idx: int = player.get("combo_index") if player.get("combo_index") != null else 0
 	var attacking: bool = player.get("is_attacking") if player.get("is_attacking") != null else false

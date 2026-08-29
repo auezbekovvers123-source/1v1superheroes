@@ -1,0 +1,42 @@
+[gd_resource type="ShaderMaterial" format=3 uid="uid://j3e4i1ipwqt0"]
+
+[ext_resource type="Shader" uid="uid://bwqgypoas3o46" path="res://Assets/Item/Cloak Assets/cloak.gdshader" id="1_qq8wj"]
+[ext_resource type="Texture2D" uid="uid://dc760rrxahbxr" path="res://Assets/Item/Cloak Assets/cloak_mask.png" id="2_mask"]
+[ext_resource type="Texture2D" uid="uid://df7y01l37es3" path="res://Assets/Item/Cloak Assets/cloak_normal.png" id="3_norm"]
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_jk2l1"]
+noise_type = 0
+seed = 1337
+frequency = 0.008
+fractal_type = 0
+fractal_octaves = 2
+
+[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_9x1c3"]
+width = 256
+height = 256
+noise = SubResource("FastNoiseLite_jk2l1")
+seamless = true
+
+[resource]
+render_priority = 0
+shader = ExtResource("1_qq8wj")
+shader_parameter/color = Color(0.78, 0.12, 0.12, 1)
+shader_parameter/cape_texture = ExtResource("2_mask")
+shader_parameter/normalmap_texture = ExtResource("3_norm")
+shader_parameter/noise_texture = SubResource("NoiseTexture2D_9x1c3")
+shader_parameter/clamp_diffuse_to_max = false
+shader_parameter/cuts = 3
+shader_parameter/wrap = 0.4
+shader_parameter/steepness = 1.4
+shader_parameter/use_attenuation = true
+shader_parameter/use_specular = false
+shader_parameter/specular_strength = 1.0
+shader_parameter/specular_shininess = 16.0
+shader_parameter/use_rim = false
+shader_parameter/rim_width = 8.0
+shader_parameter/rim_color = Color(1, 1, 1, 0)
+shader_parameter/use_ramp = false
+shader_parameter/use_borders = false
+shader_parameter/border_width = 0.01
+shader_parameter/strength = 0.07
+shader_parameter/speed = 0.22

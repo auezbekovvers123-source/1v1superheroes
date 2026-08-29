@@ -2,6 +2,9 @@ extends CharacterBody3D
 const HealthCls = preload("res://Scripts/Combat/Health.gd")
 const HurtboxCls = preload("res://Scripts/Combat/Hurtbox3D.gd")
 const HitboxCls = preload("res://Scripts/Combat/Hitbox3D.gd")
+const CloakScene = preload("res://Scenes/Items/Cloak.tscn")
+const EquipmentCls = preload("res://Scripts/Item/Equipment.gd")
+const InventoryCls = preload("res://Scripts/Item/Inventory.gd")
 ## Player.gd — Third-person CharacterBody3D controller + SATISFYING COMBAT
 ## Features:
 ##  - Over-the-shoulder camera via SpringArmPivot (Node3D) + SpringArm3D + Camera3D
@@ -56,9 +59,14 @@ var _stun_timer: float = 0.0
 var _hit_confirm_timer: float = 0.0
 var _whiff_shake: float = 0.08
 var _hitbox_debug_visible: bool = false # toggle with ` (grave) — hitbox DBG meshes invisible by default
+var is_picking_up: bool = false
+var is_aiming: bool = false
+var aim_point: Vector3 = Vector3.ZERO
+var aim_direction: Vector3 = Vector3.FORWARD
 
 @export_group("Movement")
-@export var walk_speed: float = 2.0
+@export var walk_speed: float = 2.1 # 105% of 2.0
+@export var walk_anim_speed: float = 1.2 # 120% slow-walk anim speed
 @export var run_speed: float = 5.0
 @export var jump_strength: float = 15.0
 @export var gravity: float = 50.0
@@ -80,6 +88,9 @@ var _land_anim_timer: float = 0.0
 @export var sprint_rotation_speed: float = 12.0
 @export var strafe_rotation_speed: float = 18.0
 @export var instant_strafe_lock: bool = false
+@export_group("Aiming")
+@export var aim_snap_angle: float = 45.0 # degrees cone around crosshair that auto-locks punches while aiming
+
 @export_group("Combat Feel")
 @export var attack_lunge_decay: float = 8.0
 @export var hit_punch_scale: float = 0.14
@@ -93,6 +104,7 @@ const ANIMATION_BLEND: float = 7.0
 @onready var player_mesh: Node3D = $Mesh
 @onready var spring_arm_pivot: Node3D = $SpringArmPivot
 @onready var animator: AnimationTree = $AnimationTree
+@onready var aim_camera: Camera3D = $SpringArmPivot/SpringArm3D/CameraHolder/Camera3D
 
 # Combat nodes (created dynamically if missing)
 var health: Node
@@ -100,13 +112,24 @@ var hurtbox: Area3D
 var hitbox_main: Area3D
 var hitbox_kick: Area3D
 
+# Wearable / Equipment
+var equipment: Equipment = null
+var inventory: Inventory = null
+var cloak: WearableItem = null
+@export var auto_equip_cloak: bool = false
+@export var cloak_bone: String = "spine_03.x"
+@export var cloak_color: Color = Color(0.78, 0.12, 0.12, 1)
+
 func _ready() -> void:
+	add_to_group("player")
+	add_to_group("fighter")
 	_setup_c11_if_present()
 	_setup_combat_nodes()
 	# Connect health signals
 	if health:
 		health.damaged.connect(_on_damaged)
 		health.died.connect(_on_died)
+	_setup_wearables()
 
 func _setup_combat_nodes() -> void:
 	# --- Health ---
@@ -190,6 +213,93 @@ func _setup_combat_nodes() -> void:
 	collision_layer = 1
 	collision_mask = 1
 
+func _setup_wearables() -> void:
+	# Equipment manager
+	var existing = get_node_or_null("Equipment")
+	if existing and existing is Equipment:
+		equipment = existing as Equipment
+	else:
+		equipment = EquipmentCls.new()
+		equipment.name = "Equipment"
+		add_child(equipment)
+		# Place Equipment near top so it initializes after skeleton
+		move_child(equipment, 0)
+	# Inventory bag
+	var existing_inv = get_node_or_null("Inventory")
+	if existing_inv and existing_inv is Inventory:
+		inventory = existing_inv as Inventory
+	else:
+		inventory = InventoryCls.new()
+		inventory.name = "Inventory"
+		add_child(inventory)
+	# Defer cloak equip one frame to ensure skeleton is ready
+	if auto_equip_cloak:
+		call_deferred("_equip_cloak_deferred")
+
+func _equip_cloak_deferred() -> void:
+	if not auto_equip_cloak:
+		return
+	if equipment == null:
+		equipment = get_node_or_null("Equipment") as Equipment
+		if equipment == null:
+			return
+	# ItemData.EquipSlot.CAPE = 1
+	var slot: int = 1
+	if equipment.has_equipped(slot):
+		cloak = equipment.get_equipped(slot) as WearableItem
+		if cloak:
+			cloak.set_color(cloak_color)
+		return
+	var wearable = equipment.equip_wearable(CloakScene, slot, cloak_bone)
+	if wearable:
+		cloak = wearable
+		if cloak.has_method("set_color"):
+			cloak.set_color(cloak_color)
+		print("[Player] Cloak equipped on bone '%s'" % cloak_bone)
+	else:
+		push_warning("[Player] Failed to equip cloak")
+
+func equip_cloak() -> bool:
+	if cloak and is_instance_valid(cloak) and cloak.visible:
+		return true
+	if equipment == null:
+		_setup_wearables()
+		await get_tree().process_frame
+	return _try_equip_cloak()
+
+func _try_equip_cloak() -> bool:
+	if equipment == null:
+		return false
+	var wearable = equipment.equip_wearable(CloakScene, 1, cloak_bone)
+	if wearable:
+		cloak = wearable
+		cloak.set_color(cloak_color)
+		return true
+	return false
+
+func unequip_cloak() -> void:
+	if equipment and equipment.has_equipped(1):
+		equipment.unequip_slot(1)
+		cloak = null
+		print("[Player] Cloak unequipped")
+	elif cloak and is_instance_valid(cloak):
+		cloak.visible = false
+		cloak = null
+
+func toggle_cloak() -> void:
+	if equipment and equipment.has_equipped(1):
+		var c = equipment.get_equipped(1)
+		if c and c.visible:
+			unequip_cloak()
+		else:
+			if c:
+				c.visible = true
+				cloak = c
+			else:
+				_try_equip_cloak()
+	else:
+		_try_equip_cloak()
+
 func _setup_c11_if_present() -> void:
 	var c11_node = null
 	var ap: AnimationPlayer = null
@@ -233,9 +343,12 @@ func _setup_c11_if_present() -> void:
 					if abs(first.x - last.x) > 0.005 or abs(first.z - last.z) > 0.005:
 						run_anim.track_set_key_value(tidx, cnt - 1, Vector3(first.x, last.y, first.z))
 	ap.playback_default_blend_time = 0.08
-	for n in COMBO_ANIMS + ["jump_start", "Landing", "Landing_hard"]:
+	for n in COMBO_ANIMS + ["jump_start", "Landing", "Landing_hard", "pick_up", "pickup", "Pick_up", "PickUp"]:
 		if ap.has_animation(n):
 			ap.get_animation(n).loop_mode = Animation.LOOP_NONE
+	for anim_name in ap.get_animation_list():
+		if anim_name.to_lower().begins_with("pick"):
+			ap.get_animation(anim_name).loop_mode = Animation.LOOP_NONE
 	c11_ap = ap
 	c11_use_direct = true
 	if not c11_ap.animation_finished.is_connected(_on_c11_animation_finished):
@@ -254,12 +367,16 @@ func _find_animation_player(node: Node) -> AnimationPlayer:
 			return f
 	return null
 
-func _play_c11(anim: String, blend: float = 0.2) -> void:
+func _play_c11(anim: String, blend: float = 0.2, speed_scale: float = 1.0) -> void:
 	if c11_ap == null or not c11_ap.has_animation(anim):
 		return
 	if c11_current_anim == anim and c11_ap.is_playing():
+		# keep speed_scale in sync if caller requested different speed (e.g. 120% walk)
+		if c11_ap.speed_scale != speed_scale:
+			c11_ap.speed_scale = speed_scale
 		return
-	c11_ap.play(anim, blend)
+	c11_ap.play(anim, blend, speed_scale)
+	c11_ap.speed_scale = speed_scale
 	c11_current_anim = anim
 
 # --- Combo helpers (satisfying) ---
@@ -289,47 +406,87 @@ func _play_attack(idx: int) -> void:
 	if hitbox_kick: hitbox_kick.set("active", false)
 	c11_ap.play(anim, COMBO_BLEND, spd)
 	c11_current_anim = anim
-	# --- Target snap FIRST: dead-center on enemy so lunge + hitbox are aligned ---
-	_snap_to_target()
-	# --- Lunge in snapped direction ---
+	# --- Aim FIRST: face the camera crosshair so punches go where you look ---
+	var aim_dir: Vector3 = _compute_aim_dir()
+	if aim_camera and is_instance_valid(aim_camera):
+		aim_dir = _aim_dir_from_point(_compute_aim_point())
+	_snap_to_target(aim_dir)
+	# --- Lunge in snapped/aimed direction ---
 	var forward: Vector3 = player_mesh.global_basis.z
 	forward.y = 0
 	forward = forward.normalized()
-	if forward.length() < 0.2 and spring_arm_pivot:
-		forward = Vector3.FORWARD.rotated(Vector3.UP, spring_arm_pivot.rotation.y)
-		forward.y = 0
-		forward = forward.normalized()
+	if forward.length() < 0.2:
+		forward = aim_dir
 	_lunge_velocity = forward * COMBO_LUNGE[idx] * 1.35
 	# --- Punch scale anticip. ---
 	_do_attack_anticipation(idx)
 	# --- Whiff FOV kick handled via spring pivot ---
 	print("[Combo] %d/%d %s dmg=%.0f hs=%.2f" % [idx + 1, COMBO_ANIMS.size(), anim, COMBO_DAMAGE[idx], COMBO_HITSTOP[idx]])
 
-func _snap_to_target() -> void:
+func _compute_aim_dir() -> Vector3:
+	# Flat world direction the camera/crosshair is pointing at (ground-projected)
+	var dir: Vector3 = Vector3.FORWARD
+	if spring_arm_pivot:
+		dir = Vector3.FORWARD.rotated(Vector3.UP, spring_arm_pivot.rotation.y)
+	dir.y = 0
+	if dir.length() < 0.01:
+		dir = Vector3.FORWARD
+	return dir.normalized()
+
+func _compute_aim_point() -> Vector3:
+	# Raycast from camera through screen center to get a precise world aim point
+	var cam: Camera3D = aim_camera
+	if cam == null or not is_instance_valid(cam):
+		return global_position + _compute_aim_dir() * 20.0
+	var vp_center := get_viewport().get_visible_rect().size * 0.5
+	var from := cam.global_position
+	var to := cam.project_ray_origin(vp_center) + cam.project_ray_normal(vp_center) * 60.0
+	var q := PhysicsRayQueryParameters3D.create(from, to)
+	q.collide_with_areas = true
+	q.collide_with_bodies = true
+	# Exclude the player's own body AND combat areas (hurtbox/hitboxes) so the
+	# crosshair ray isn't blocked by the player's torso hanging in front of the
+	# camera — otherwise the aim point resolves to behind the player and they
+	# spin 180 degrees.
+	var exclude: Array[RID] = [get_rid()]
+	for child in get_children():
+		if child is CollisionObject3D:
+			exclude.append((child as CollisionObject3D).get_rid())
+	q.exclude = exclude
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	if hit:
+		return hit.position
+	return to
+
+func _aim_dir_from_point(point: Vector3) -> Vector3:
+	var dir := point - global_position
+	dir.y = 0
+	if dir.length() < 0.05:
+		return _compute_aim_dir()
+	dir = dir.normalized()
+	var cam_dir := _compute_aim_dir()
+	# Safety: if the aim point resolves behind/sideways of the camera view
+	# (e.g. looking straight down at your feet), fall back to the camera
+	# forward so the player never snaps 180 degrees.
+	if rad_to_deg(cam_dir.angle_to(dir)) > 85.0:
+		return cam_dir
+	return dir
+
+func _snap_to_target(aim_dir: Vector3) -> void:
 	if player_mesh == null:
 		return
+	if aim_dir.length() < 0.1:
+		aim_dir = _compute_aim_dir()
 	var best: Node3D = null
-	var best_ang: float = 180.0
+	var best_ang: float = aim_snap_angle if is_aiming else target_snap_angle
 	var best_dist: float = INF
-	# Search fighters/dummies/health groups — pick most screen-centered enemy within range (dead-center)
+	var snap_cone: float = aim_snap_angle if is_aiming else target_snap_angle
+	# Search fighters/dummies/health groups — pick the enemy closest to the camera aim ray
 	var candidates: Array[Node] = []
 	candidates.append_array(get_tree().get_nodes_in_group("health"))
 	candidates.append_array(get_tree().get_nodes_in_group("dummy"))
 	candidates.append_array(get_tree().get_nodes_in_group("fighter"))
 	var seen: Dictionary = {}
-	# Use camera look direction for "centered" test (where player is actually looking)
-	var cam_fwd: Vector3 = Vector3.ZERO
-	if spring_arm_pivot:
-		# Pivot's forward is Vector3.FORWARD (-Z) rotated by yaw; matches SpringArmPivot.gd
-		cam_fwd = Vector3.FORWARD.rotated(Vector3.UP, spring_arm_pivot.rotation.y)
-		cam_fwd.y = 0
-		cam_fwd = cam_fwd.normalized()
-	else:
-		cam_fwd = player_mesh.global_basis.z
-		cam_fwd.y = 0
-		cam_fwd = cam_fwd.normalized()
-		if cam_fwd.length() < 0.1:
-			cam_fwd = Vector3.FORWARD
 	for n in candidates:
 		var body: Node3D = null
 		if n.is_in_group("health"):
@@ -348,27 +505,23 @@ func _snap_to_target() -> void:
 		if to_flat.length() < 0.01:
 			continue
 		to_flat = to_flat.normalized()
-		var fwd_len: float = cam_fwd.length()
-		var fwd: Vector3 = cam_fwd if fwd_len > 0.1 else Vector3.FORWARD.rotated(Vector3.UP, spring_arm_pivot.rotation.y if spring_arm_pivot else 0.0)
-		var ang: float = rad_to_deg(fwd.angle_to(to_flat))
-		if ang > target_snap_angle:
+		var ang: float = rad_to_deg(aim_dir.angle_to(to_flat))
+		if ang > snap_cone:
 			continue
-		# Pick smallest angle; tie-break closest distance for dead-center.
+		# Pick smallest angle (closest to crosshair); tie-break closest distance
 		if ang < best_ang - 0.01 or (abs(ang - best_ang) < 0.01 and dist < best_dist):
 			best_ang = ang
 			best_dist = dist
 			best = body
+	# Face the aim point by default so punches go where the crosshair points;
+	# if an enemy sits near the crosshair, snap dead-center onto it so hits never whiff.
+	var face_dir: Vector3 = aim_dir
 	if best:
-		var dir: Vector3 = (best.global_position - global_position)
+		var dir: Vector3 = best.global_position - global_position
 		dir.y = 0
-		if dir.length() < 0.01:
-			return
-		var base_yaw: float = atan2(dir.x, dir.z)
-		# INSTANT dead-center snap — no tween, no 8° deadzone, no duration. Ensures punch never whiffs due to facing.
-		player_mesh.rotation.y = base_yaw
-		# Force update of global transform so hitbox/lunge computed next line use new facing immediately
-		# (no need to defer; _play_attack reads global_basis after this)
-		# Camera does NOT snap — only character
+		if dir.length() >= 0.01:
+			face_dir = dir.normalized()
+	player_mesh.rotation.y = atan2(face_dir.x, face_dir.z)
 
 func _do_attack_anticipation(idx: int) -> void:
 	if player_mesh == null:
@@ -627,6 +780,11 @@ func _try_attack() -> void:
 			combo_queued = true
 
 func _on_c11_animation_finished(anim_name: String) -> void:
+	if anim_name.to_lower().begins_with("pick") or anim_name.to_lower() == "pick_up" or anim_name.to_lower() == "pickup":
+		is_picking_up = false
+		c11_current_anim = ""
+		_play_c11("Idle")
+		return
 	if anim_name not in COMBO_ANIMS:
 		return
 	# Disable hitboxes
@@ -675,12 +833,92 @@ func _unhandled_input(event: InputEvent) -> void:
 			_toggle_hitbox_debug()
 			get_viewport().set_input_as_handled()
 			return
+		# Toggle cloak with C
+		if event.keycode == KEY_C:
+			toggle_cloak()
+			get_viewport().set_input_as_handled()
+			return
+		# Pick up item with F
+		if event.keycode == KEY_F:
+			if _try_interact_pickup():
+				get_viewport().set_input_as_handled()
+				return
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-		_try_attack()
+		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not is_picking_up:
+			_try_attack()
+
+func _try_interact_pickup() -> bool:
+	if is_picking_up or is_attacking:
+		return false
+	
+	var best_pickup: Node3D = null
+	var best_dist: float = 3.5
+	
+	for group_name in ["pickup", "item_pickup"]:
+		for p in get_tree().get_nodes_in_group(group_name):
+			if p is Node3D and is_instance_valid(p) and p.visible and not p.get("_picked"):
+				var dist: float = global_position.distance_to(p.global_position)
+				if dist < best_dist:
+					best_dist = dist
+					best_pickup = p as Node3D
+	
+	if best_pickup == null:
+		return false
+
+	# Turn player towards the pickup
+	if player_mesh:
+		var dir := (best_pickup.global_position - global_position)
+		dir.y = 0.0
+		if dir.length() > 0.05:
+			player_mesh.look_at(global_position - dir.normalized(), Vector3.UP)
+	
+	# Check for pickup animation in c11_ap
+	var pickup_anim := ""
+	if c11_ap:
+		for candidate in ["pick_up", "pickup", "Pick_up", "PickUp", "pick_up_item"]:
+			if c11_ap.has_animation(candidate):
+				pickup_anim = candidate
+				break
+		if pickup_anim == "":
+			for anim_name in c11_ap.get_animation_list():
+				if anim_name.to_lower().begins_with("pick"):
+					pickup_anim = anim_name
+					break
+
+	if pickup_anim != "" and c11_ap:
+		is_picking_up = true
+		_play_c11(pickup_anim, 0.1, 1.25)
+		var anim_len: float = c11_ap.get_animation(pickup_anim).length / 1.25
+		var delay: float = clampf(anim_len * 0.45, 0.15, 0.45)
+		get_tree().create_timer(delay).timeout.connect(func():
+			if is_instance_valid(best_pickup) and best_pickup.has_method("try_interact"):
+				best_pickup.call("try_interact", self)
+		)
+	else:
+		if best_pickup.has_method("try_interact"):
+			best_pickup.call("try_interact", self)
+	
+	return true
 
 func _physics_process(delta: float) -> void:
-	if Input.is_action_just_pressed("punch"):
+	if is_picking_up:
+		velocity.x = lerp(velocity.x, 0.0, delta * 14.0)
+		velocity.z = lerp(velocity.z, 0.0, delta * 14.0)
+		if not is_on_floor():
+			velocity.y -= gravity * delta
+		move_and_slide()
+		return
+	if Input.is_action_just_pressed("punch") and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_try_attack()
+	# ---- Aiming (hold RMB) ---- 
+	var should_aim: bool = Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not is_picking_up
+	if should_aim != is_aiming:
+		is_aiming = should_aim
+		if spring_arm_pivot and spring_arm_pivot.has_method("set_aiming"):
+			spring_arm_pivot.set_aiming(is_aiming)
+	if is_aiming:
+		aim_point = _compute_aim_point()
+		aim_direction = _aim_dir_from_point(aim_point)
 	# Timers
 	if _stun_timer > 0.0:
 		_stun_timer -= delta
@@ -712,7 +950,7 @@ func _physics_process(delta: float) -> void:
 	if spring_arm_pivot:
 		move_direction = move_direction.rotated(Vector3.UP, spring_arm_pivot.rotation.y)
 	# ---- Speed toggle ----
-	var is_sprinting: bool = Input.is_action_pressed("run") and not is_attacking and _stun_timer <= 0.0
+	var is_sprinting: bool = Input.is_action_pressed("run") and not is_attacking and _stun_timer <= 0.0 and not is_aiming
 	if is_sprinting:
 		speed = run_speed
 	else:
@@ -761,6 +999,10 @@ func _physics_process(delta: float) -> void:
 		if is_attacking:
 			# keep current facing, slight lerp to maintain
 			pass
+		elif is_aiming:
+			# Face the crosshair aim direction while aiming
+			var aim_yaw: float = atan2(aim_direction.x, aim_direction.z)
+			player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, aim_yaw, strafe_rotation_speed * delta)
 		elif is_sprinting and has_input:
 			var target_angle := atan2(move_direction.x, move_direction.z)
 			player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, target_angle, sprint_rotation_speed * delta)
@@ -806,7 +1048,7 @@ func _physics_process(delta: float) -> void:
 		coyote_timer = 0.0
 		jump_buffer_timer = 0.0
 		was_on_floor = false
-		_do_squash(0.88, 1.18, 0.12)
+		_jump_stretch()
 		_play_jump_anim()
 	elif just_landed:
 		snap_vector = Vector3.DOWN
@@ -864,6 +1106,14 @@ func _get_slow_walk_anim() -> String:
 		return "Walk"
 	return anim
 
+func _jump_stretch() -> void:
+	if player_mesh == null:
+		return
+	player_mesh.scale = Vector3(0.88, 1.18, 0.88)
+	var tw := create_tween()
+	tw.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_property(player_mesh, "scale", Vector3.ONE, 0.12)
+
 func _do_squash(sx: float, sy: float, dur: float) -> void:
 	if player_mesh == null:
 		return
@@ -905,9 +1155,11 @@ func animate(delta: float) -> void:
 		if is_on_floor():
 			if velocity.length() > 0.1:
 				if speed == run_speed and Input.is_action_pressed("run"):
-					_play_c11("running")
+					_play_c11("running", 0.2, 1.0)
 				else:
-					_play_c11(_get_slow_walk_anim())
+					var walk_anim := _get_slow_walk_anim()
+					var s_spd := walk_anim_speed if walk_anim != "Idle" else 1.0
+					_play_c11(walk_anim, 0.2, s_spd)
 			else:
 				_play_c11("Idle")
 		else:

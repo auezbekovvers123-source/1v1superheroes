@@ -1,0 +1,21 @@
+[gd_scene load_steps=4 format=3 uid="uid://bq7m2c9k8d4e5"]
+
+[ext_resource type="Script" path="res://Scripts/Item/CloakWearable.gd" id="1_cloak_script"]
+[ext_resource type="Material" uid="uid://h9v5bmuzucidj" path="res://Assets/Item/Cloak Assets/cloak_material.tres" id="2_mat"]
+[ext_resource type="ArrayMesh" uid="uid://uanbposmxfrh" path="res://Assets/Item/Cloak Assets/cloak_mesh.obj" id="3_mesh"]
+
+[node name="Cloak" type="BoneAttachment3D"]
+script = ExtResource("1_cloak_script")
+bone_name = "spine_03.x"
+item_name = "Cloak"
+item_id = "cloak_01"
+mesh_offset = Vector3(0, 0.18, -0.14)
+mesh_rotation_deg = Vector3(0, 0, 0)
+mesh_scale = Vector3(0.145, 0.145, 0.145)
+
+[node name="CloakMesh" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.18, -0.14)
+mesh = ExtResource("3_mesh")
+surface_material_override/0 = ExtResource("2_mat")
+material_override = ExtResource("2_mat")
+cast_shadow = 1

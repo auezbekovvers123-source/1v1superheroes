@@ -1,0 +1,19 @@
+[gd_resource type="Resource" script_class="ItemData" format=3 uid="uid://coka02hmxojdk"]
+
+[ext_resource type="Script" path="res://Scripts/Item/ItemData.gd" id="1_data"]
+[ext_resource type="PackedScene" uid="uid://bq7m2c9k8d4e5" path="res://Scenes/Items/Cloak.tscn" id="2_scene"]
+[ext_resource type="ArrayMesh" uid="uid://uanbposmxfrh" path="res://Assets/Item/Cloak Assets/cloak_mesh.obj" id="3_mesh"]
+[ext_resource type="Material" uid="uid://h9v5bmuzucidj" path="res://Assets/Item/Cloak Assets/cloak_material.tres" id="4_mat"]
+
+[resource]
+script = ExtResource("1_data")
+id = "cloak_01"
+display_name = "Hero Cloak"
+description = "A flowing hero cloak with wind simulation. Wearable on spine_03.x (upper back). Provides dramatic flair."
+type = 0
+slot = 1
+scene = ExtResource("2_scene")
+mesh = ExtResource("3_mesh")
+material = ExtResource("4_mat")
+bone_name = "spine_03.x"
+preview_color = Color(0.78, 0.12, 0.12, 1)

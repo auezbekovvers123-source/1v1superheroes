@@ -64,7 +64,9 @@ script = ExtResource("2_f8ihf")
 [node name="SpringArm3D" type="SpringArm3D" parent="SpringArmPivot"]
 spring_length = 3.0
 
-[node name="Camera3D" type="Camera3D" parent="SpringArmPivot/SpringArm3D"]
+[node name="CameraHolder" type="Node3D" parent="SpringArmPivot/SpringArm3D"]
+
+[node name="Camera3D" type="Camera3D" parent="SpringArmPivot/SpringArm3D/CameraHolder"]
 
 [node name="AnimationPlayer" type="AnimationPlayer" parent="."]
 

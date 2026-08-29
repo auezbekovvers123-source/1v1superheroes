@@ -6,6 +6,7 @@ extends Node3D
 @export var change_fov_on_run: bool = true
 @export var normal_fov: float = 75.0
 @export var run_fov: float = 90.0
+@export var aim_fov: float = 62.0 # tight FOV while holding RMB to aim
 @export var attack_fov_kick: float = 6.0 # extra FOV on punch (snap back)
 
 @export_group("Shake")
@@ -17,11 +18,15 @@ extends Node3D
 @export var shake_freq: float = 18.0
 @export var positional_shake: float = 0.045
 
+@export_group("Aim Camera")
+@export var aim_cam_offset: Vector3 = Vector3(1.1, 0.0, 0.0) # shift camera right (+X) when aiming — over-the-shoulder, needs ~1m to be visible
+@export var aim_cam_blend: float = 10.0
+
 const CAMERA_BLEND: float = 0.08
 const PITCH_BLEND: float = 0.12
 
 @onready var spring_arm: SpringArm3D = $SpringArm3D
-@onready var camera: Camera3D = $SpringArm3D/Camera3D
+@onready var camera: Camera3D = $SpringArm3D/CameraHolder/Camera3D
 
 var trauma: float = 0.0
 var _noise_time: float = 0.0
@@ -29,13 +34,17 @@ var _base_spring_length: float = 3.0
 var _fov_kick: float = 0.0
 var _kick_decay: float = 9.0
 var _recoil_pitch: float = 0.0
+var aiming: bool = false
+
+func set_aiming(on: bool) -> void:
+	aiming = on
 
 func _ready():
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
 	if spring_arm:
 		_base_spring_length = spring_arm.spring_length
 	if camera == null:
-		camera = get_node_or_null("SpringArm3D/Camera3D") as Camera3D
+		camera = get_node_or_null("SpringArm3D/CameraHolder/Camera3D") as Camera3D
 
 func add_trauma(amount: float) -> void:
 	trauma = clamp(trauma + amount, 0.0, 1.0)
@@ -50,6 +59,8 @@ func kick_fov(amount: float = 5.0) -> void:
 
 func _unhandled_input(event):
 	if event is InputEventMouseMotion:
+		if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+			return
 		var sens: float = 0.005
 		# Reduce sensitivity during hitstop (time_scale small) — keep feeling
 		rotate_y(-event.relative.x * sens)
@@ -78,6 +89,11 @@ func _physics_process(delta: float):
 		spring_arm.rotation.x += _recoil_pitch * delta * 5.0
 	# Apply shake (offset camera, not whole pivot to avoid affecting movement)
 	if camera:
+		# Aim over-the-shoulder offset (lerp so it eases in/out, doesn't fight shake yaw/roll)
+		if aiming:
+			camera.position = camera.position.lerp(aim_cam_offset, clampf(aim_cam_blend * udelta, 0.0, 1.0))
+		else:
+			camera.position = camera.position.lerp(Vector3.ZERO, clampf(aim_cam_blend * udelta, 0.0, 1.0))
 		var shake_amount: float = pow(trauma, trauma_power)
 		# Perlin-ish via sin hash
 		var yaw: float = sin(_noise_time * 1.37) * cos(_noise_time * 0.77) * deg_to_rad(max_yaw_shake) * shake_amount
@@ -96,7 +112,9 @@ func _physics_process(delta: float):
 	# FOV handling
 	if camera:
 		var target_fov: float = normal_fov
-		if change_fov_on_run and owner and owner is CharacterBody3D and (owner as CharacterBody3D).is_on_floor():
+		if aiming:
+			target_fov = aim_fov
+		elif change_fov_on_run and owner and owner is CharacterBody3D and (owner as CharacterBody3D).is_on_floor():
 			if Input.is_action_pressed("run") and (owner as CharacterBody3D).velocity.length() > 0.6 and not (owner as CharacterBody3D).get("is_attacking"):
 				target_fov = run_fov
 		target_fov += _fov_kick

@@ -14,8 +14,8 @@ signal hit_landed(target: Node, damage: float)
 var active: bool = false:
 	set(v):
 		active = v
-		monitoring = v
-		monitorable = v
+		set_deferred("monitoring", v)
+		set_deferred("monitorable", v)
 		if v:
 			_already_hit.clear()
 
