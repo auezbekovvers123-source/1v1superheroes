@@ -147,6 +147,9 @@ func start_ragdoll(hit_direction: Vector3 = Vector3.ZERO, hit_position: Vector3 
 			var pb := child as PhysicalBone3D
 			# can_sleep is valid; sleeping/freeze are not on PhysicalBone3D in Godot 4
 			pb.can_sleep = false
+			# Restore collision layers (reset_ragdoll zeroes them)
+			pb.collision_layer = 1
+			pb.collision_mask = 1
 
 	_is_ragdolled = true
 
@@ -158,33 +161,46 @@ func start_ragdoll(hit_direction: Vector3 = Vector3.ZERO, hit_position: Vector3 
 func reset_ragdoll() -> void:
 	if not _is_ragdolled and not _built:
 		return
-	# Zero all bone velocities before stopping to prevent snap impulse
 	if skeleton and is_instance_valid(skeleton):
 		for child in skeleton.get_children():
 			if child is PhysicalBone3D:
 				var pb := child as PhysicalBone3D
 				pb.linear_velocity = Vector3.ZERO
 				pb.angular_velocity = Vector3.ZERO
-		# Only stop if currently simulating
+				pb.can_sleep = true
 		if _is_ragdolled:
 			skeleton.physical_bones_stop_simulation()
-			# Force skeleton back to rest pose to avoid pose carry-over
-			# Reset overrides that ragdoll may have left
+			for child in skeleton.get_children():
+				if child is PhysicalBone3D:
+					var pb2 := child as PhysicalBone3D
+					pb2.linear_velocity = Vector3.ZERO
+					pb2.angular_velocity = Vector3.ZERO
 			if skeleton.has_method("reset_bone_poses"):
 				skeleton.reset_bone_poses()
 			elif skeleton.has_method("clear_bones_global_pose_override"):
 				skeleton.clear_bones_global_pose_override()
-
+			if skeleton.has_method("force_update_bone_child_transforms"):
+				skeleton.force_update_bone_child_transforms()
 	_is_ragdolled = false
-
-	# Re-enable collision
+	# Disable physical bone collisions so they don't fight CharacterBody3D move_and_slide
+	if skeleton and is_instance_valid(skeleton):
+		for child in skeleton.get_children():
+			if child is PhysicalBone3D:
+				var pb3 := child as PhysicalBone3D
+				pb3.collision_layer = 0
+				pb3.collision_mask = 0
 	if _character_body:
 		_character_body.collision_layer = _original_collision_layer
 		_character_body.collision_mask = _original_collision_mask
 		if _collision_shape and is_instance_valid(_collision_shape):
-			_collision_shape.disabled = false
-		# Clear any residual CharacterBody velocity
+			var lock_active: bool = false
+			if _character_body.get("_respawn_lock") != null:
+				lock_active = float(_character_body.get("_respawn_lock")) > 0.0
+			if not lock_active:
+				_collision_shape.disabled = false
 		_character_body.velocity = Vector3.ZERO
+		if _character_body.has_method("reset_physics_interpolation"):
+			_character_body.reset_physics_interpolation()
 
 	# Re-enable animations
 	if _anim_tree and is_instance_valid(_anim_tree):

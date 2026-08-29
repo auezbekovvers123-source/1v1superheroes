@@ -22,10 +22,19 @@ var _mesh: Node3D
 var _health_bar: ProgressBar
 var _bar_host: Control
 var _respawn_lock: float = 0.0
+var _anchor_timer: float = 0.0
 
 func _ready() -> void:
 	add_to_group("dummy")
 	add_to_group("fighter")
+	# Fix air-spawn (capsule bottom 0.60 above floor at y 0.92) by allowing floor snap to cover gap
+	floor_stop_on_slope = true
+	floor_constant_speed = false
+	floor_snap_length = 0.75
+	wall_min_slide_angle = deg_to_rad(55.0)
+	safe_margin = 0.02
+	up_direction = Vector3.UP
+	motion_mode = CharacterBody3D.MOTION_MODE_GROUNDED
 	_respawn_pos = global_position
 	_respawn_yaw = rotation.y
 	_mesh = get_node_or_null("Mesh") as Node3D
@@ -176,41 +185,73 @@ func _physics_process(delta: float) -> void:
 		# Still update health bar but freeze body motion — also pin to death pos so ragdoll doesn't inherit CharacterBody slide
 		velocity = Vector3.ZERO
 		return
-	# Respawn lock — HARD pin after teleport to prevent any slide/teleport glitch (physics settle)
+	# Respawn lock — HARD pin after teleport, keep collision disabled whole lock
+	# Original only disabled first half ( >0.25 ) leaving 0.25s where depenetration injected horizontal velocity
 	if _respawn_lock > 0.0:
 		_respawn_lock -= delta
 		velocity = Vector3.ZERO
-		# Keep snapped to spawn pos (no gravity) for the lock duration — also zero any external pushes
 		global_position = _respawn_pos
-		# Keep collision disabled during first half of lock to avoid depenetration push from floor/wall
 		var cs := get_node_or_null("CollisionShape3D") as CollisionShape3D
 		if cs:
-			cs.disabled = _respawn_lock > 0.25
-		# Don't call move_and_slide while locked — keeps physics from adding slide
+			cs.disabled = true
 		return
 	else:
-		# Ensure collision is enabled after lock
 		var cs2 := get_node_or_null("CollisionShape3D") as CollisionShape3D
 		if cs2 and cs2.disabled:
 			cs2.disabled = false
+		# Restore collision layers if respawn disabled them
+		if has_meta("_saved_layer"):
+			collision_layer = int(get_meta("_saved_layer"))
+			remove_meta("_saved_layer")
+		if has_meta("_saved_mask"):
+			collision_mask = int(get_meta("_saved_mask"))
+			remove_meta("_saved_mask")
+		if collision_layer == 0:
+			collision_layer = 1
+		if collision_mask == 0:
+			collision_mask = 1
+	# Anchor — pin position for 0.8s after respawn to prevent depenetration from sliding the body
+	if _anchor_timer > 0.0:
+		_anchor_timer -= delta
+		velocity = Vector3.ZERO
+		global_position = _respawn_pos
+		if _anchor_timer > 0.4:
+			_stun_timer = 0.0
+		return
 	if health and health.is_dead:
 		velocity.x = lerp(velocity.x, 0.0, delta * 2.0)
 		velocity.z = lerp(velocity.z, 0.0, delta * 2.0)
 		velocity.y -= gravity * delta
 		move_and_slide()
+		if velocity.length() < 0.05:
+			velocity = Vector3.ZERO
 		return
 	if _stun_timer > 0.0:
 		_stun_timer -= delta
 		velocity.x = lerp(velocity.x, 0.0, friction * delta)
 		velocity.z = lerp(velocity.z, 0.0, friction * delta)
 	else:
-		# Idle wander or stand; gentle friction
 		velocity.x = lerp(velocity.x, 0.0, friction * delta * 0.5)
 		velocity.z = lerp(velocity.z, 0.0, friction * delta * 0.5)
+		if abs(velocity.x) < 0.02:
+			velocity.x = 0.0
+		if abs(velocity.z) < 0.02:
+			velocity.z = 0.0
 		if c11_ap and not c11_ap.is_playing():
 			_play("Idle")
 	velocity.y -= gravity * delta
 	move_and_slide()
+	if is_on_floor():
+		if abs(velocity.x) < 0.05:
+			velocity.x = 0.0
+		if abs(velocity.z) < 0.05:
+			velocity.z = 0.0
+		if velocity.y > -0.5 and velocity.y < 0.5:
+			velocity.y = 0.0
+	else:
+		if velocity.length() < 0.08 and _stun_timer <= 0.0:
+			velocity.x = 0.0
+			velocity.z = 0.0
 	# Keep health bar facing camera: handled by billboard material
 
 func _on_damaged(amount: float, from: Node, knockback: Vector3, is_crit: bool) -> void:
@@ -298,30 +339,32 @@ func _on_died(_killer: Node) -> void:
 	# (previously this and Health both scheduled respawn causing double teleport + slide)
 
 func respawn() -> void:
-	# Guard against double respawn (Health and _on_died both used to schedule)
 	if not health.is_dead and not (ragdoll and ragdoll.is_ragdolled()):
-		# Already respawned, ignore duplicate call
 		return
-	# Stop ragdoll first so skeleton returns to animated control BEFORE teleport
-	# Important: keep CollisionShape disabled during the teleport to avoid physics depenetration push
 	var cs := get_node_or_null("CollisionShape3D") as CollisionShape3D
 	if cs:
 		cs.disabled = true
+	# Reset ragdoll first — this restores original collision layers/masks
 	if ragdoll and ragdoll.is_ragdolled():
 		ragdoll.reset_ragdoll()
-		# Ragdoll reset re-enables collision — disable again for the teleport lock phase
 		if cs:
 			cs.disabled = true
-	# Also zero any pending physics state that could cause slide
+	# Capture the correct original layers after ragdoll reset
+	var saved_layer := collision_layer
+	var saved_mask := collision_mask
+	collision_layer = 0
+	collision_mask = 0
 	_stun_timer = 0.0
 	velocity = Vector3.ZERO
-	# Snap position without interpolation artifacts — reset physics state
 	global_position = _respawn_pos
 	rotation.y = _respawn_yaw
-	# Clear velocity again after teleport
 	velocity = Vector3.ZERO
-	# Pin for a longer time after respawn to let physics fully settle and avoid slide/teleport
+	if has_method("reset_physics_interpolation"):
+		reset_physics_interpolation()
+	set_meta("_saved_layer", saved_layer)
+	set_meta("_saved_mask", saved_mask)
 	_respawn_lock = 0.85
+	_anchor_timer = 0.8
 	if _mesh:
 		_mesh.scale = Vector3.ONE
 		# Reset skeleton pose explicitly (ragdoll may have left bones offset)
@@ -360,9 +403,8 @@ func respawn() -> void:
 		tw.tween_property(flash, "scale", Vector3(2.2, 2.2, 2.2), 0.28)
 		tw.parallel().tween_property(mat, "albedo_color:a", 0.0, 0.28)
 		tw.tween_callback(func(): if is_instance_valid(flash): flash.queue_free())
-	# Ensure Health invuln briefly to prevent instant re-hit slide
 	if health:
-		health.set("_invuln_timer", 0.65)
+		health.set("_invuln_timer", 1.3)
 	# Debug — if still slides, will print velocity/pos next frames
 	#print("[Dummy] respawn at ", global_position, " vel ", velocity, " lock ", _respawn_lock)
 

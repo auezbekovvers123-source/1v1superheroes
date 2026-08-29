@@ -45,13 +45,17 @@ func take_damage(amount: float, from: Node = null, knockback: Vector3 = Vector3.
 	var is_crit := amount >= 18.0
 	_last_knockback = knockback
 	_last_hit_dir = knockback.normalized() if knockback.length() > 0.01 else Vector3.ZERO
-	# Apply knockback to owner if CharacterBody3D — but skip if already ragdolled (physics bones own motion)
 	var is_ragdolled: bool = false
 	if _owner_body and _owner_body.has_node("RagdollController"):
 		var rc = _owner_body.get_node("RagdollController")
 		if rc and rc.has_method("is_ragdolled") and rc.is_ragdolled():
 			is_ragdolled = true
-	if _owner_body and knockback != Vector3.ZERO and not is_ragdolled:
+	var is_anchored: bool = false
+	if _owner_body and _owner_body.get("_anchor_timer") != null and float(_owner_body.get("_anchor_timer")) > 0.0:
+		is_anchored = true
+	if _owner_body and _owner_body.get("_respawn_lock") != null and float(_owner_body.get("_respawn_lock")) > 0.0:
+		is_anchored = true
+	if _owner_body and knockback != Vector3.ZERO and not is_ragdolled and not is_anchored:
 		_owner_body.velocity += knockback
 		# brief stun: add meta
 		_owner_body.set_meta("stun_time", 0.22 if is_crit else 0.14)
