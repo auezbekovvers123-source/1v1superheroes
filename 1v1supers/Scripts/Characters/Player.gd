@@ -42,9 +42,9 @@ var _upper_look_angle: float = 0.0
 # --- Walk blend smoothing (left <-> right etc) ---
 var _walk_blend_pos: Vector2 = Vector2(0, 1)
 @export_group("Animation Smoothing")
-@export var walk_blend_smoothing: float = 9.0 # higher = snappier response; 9 still smooths left<->right reversals without snapping
-@export var walk_blend_smoothing_idle: float = 14.0 # faster when leaving idle to avoid sluggish first step
-@export var walk_direct_xfade: float = 0.34 # direct AnimationPlayer crossfade for 8-way Walk (left<->right) — longer = no snap
+@export var walk_blend_smoothing: float = 14.0 # higher = snappier response; 9 still smooths left<->right reversals without snapping
+@export var walk_blend_smoothing_idle: float = 20.0 # faster when leaving idle to avoid sluggish first step
+@export var walk_direct_xfade: float = 0.22 # direct AnimationPlayer crossfade for 8-way Walk (left<->right) — longer = no snap
 
 # --- Combo attack (LMB) : Right hook > left punch > Right cross > leg kick ---
 const COMBO_ANIMS: Array[String] = ["punch_hook", "punch_left_simple1", "punch_cross", "kick_spin"]
@@ -86,12 +86,28 @@ var is_aiming: bool = false
 var aim_point: Vector3 = Vector3.ZERO
 var aim_direction: Vector3 = Vector3.FORWARD
 
+# --- Dash (Ctrl) ---
+var is_dashing: bool = false
+var dash_timer: float = 0.0
+var dash_recovery_timer: float = 0.0
+var dash_direction: Vector3 = Vector3.ZERO
+var dash_anim_speed: float = 1.0
+var _dash_key_latched: bool = false
+var _dash_is_diagonal: bool = false # true if dash started from W+A/W+D/S+A/S+D
+
 @export_group("Movement")
 @export var walk_speed: float = 2.1 # 105% of 2.0
 @export var walk_anim_speed: float = 1.25 # 125% walk anim speed
 @export var run_speed: float = 5.0
 @export var jump_strength: float = 15.0
 @export var gravity: float = 50.0
+
+@export_group("Dash")
+@export var dash_speed: float = 9.34 # burst velocity during dash — 2x further than 4.67 (was 14.0 -> 4.67 -> 9.34)
+@export var dash_duration: float = 0.22 # how long the dash burst lasts
+@export var dash_recovery: float = 0.18 # brief slowdown after burst before full control returns
+@export var dash_anim_speed_scale: float = 1.6 # play dash anim faster than authored speed
+@export var dash_cancel_attack_window: float = 0.55 # after attack start, allow dash to cancel (s)
 
 @export_group("Jump Feel - Satisfying")
 @export var coyote_time: float = 0.14
@@ -107,9 +123,21 @@ var _jump_anim_timer: float = 0.0
 var _land_anim_timer: float = 0.0
 
 @export_group("Rotation Modes")
-@export var sprint_rotation_speed: float = 12.0
-@export var strafe_rotation_speed: float = 18.0
+@export var sprint_rotation_speed: float = 22.0
+@export var strafe_rotation_speed: float = 32.0
 @export var instant_strafe_lock: bool = false
+@export_group("Turn In Place (Camera Threshold)")
+@export var turn_threshold_deg: float = 90.0
+@export var turn_enabled: bool = true
+@export var turn_only_when_idle: bool = true # if false, also triggers while walking slowly
+@export var turn_anim_speed: float = 1.8
+@export var turn_rotation_duration: float = 0.16 # how fast mesh tweens 90deg after anim (s)
+@export var turn_cooldown: float = 0.02 # small lock after turn to avoid double trigger
+var _is_turning: bool = false
+var _turn_cooldown_timer: float = 0.0
+var _turn_tween: Tween = null
+var _last_turn_cam_yaw: float = 0.0
+var _turn_reference_initialized: bool = false
 @export_group("Aiming")
 @export var aim_snap_angle: float = 45.0 # degrees cone around crosshair that auto-locks punches while aiming
 
@@ -121,7 +149,7 @@ var _land_anim_timer: float = 0.0
 @export var combo_chain_window: float = 0.22 # how early before end you can queue (s)
 @export var whiff_recovery_mult: float = 1.15 # whiff = longer recovery visual
 
-const ANIMATION_BLEND: float = 5.0 # lower = smoother Idle<->Walk<->Run blend (was 7.0, snapped)
+const ANIMATION_BLEND: float = 9.0 # lower = smoother Idle<->Walk<->Run blend (was 7.0, snapped)
 
 @onready var player_mesh: Node3D = $Mesh
 @onready var spring_arm_pivot: Node3D = $SpringArmPivot
@@ -397,6 +425,14 @@ func _setup_c11_if_present() -> void:
 	for anim_name in ap.get_animation_list():
 		if anim_name.to_lower().begins_with("pick"):
 			ap.get_animation(anim_name).loop_mode = Animation.LOOP_NONE
+	# Dodge dash animations must be one-shot, not looping
+	for dodge_name in ["Dodge_forward", "Dodge_backward", "Dodge_right", "Dodge_left"]:
+		if ap.has_animation(dodge_name):
+			ap.get_animation(dodge_name).loop_mode = Animation.LOOP_NONE
+	# Turn in place must be one-shot, not looping (otherwise overlaps Idle)
+	for turn_name in ["Turn_left", "Turn_right", "turn_left", "turn_right"]:
+		if ap.has_animation(turn_name):
+			ap.get_animation(turn_name).loop_mode = Animation.LOOP_NONE
 	c11_ap = ap
 	# --- Layered vs Direct mode ---
 	if use_layered_anims and animator:
@@ -948,6 +984,13 @@ func _on_damaged(amount: float, from: Node, _kb: Vector3, _is_crit: bool) -> voi
 	if _is_crit and is_attacking:
 		# heavy hit breaks combo
 		combo_queued = false
+	# Heavy hit cancels dash so knockback plays cleanly
+	if _is_crit and is_dashing:
+		is_dashing = false
+		_is_fullbody_action = false
+		dash_timer = 0.0
+		if use_layered_anims and animator and animator.active:
+			animator.set("parameters/UpperOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_ABORT)
 
 func _on_died(_killer: Node) -> void:
 	is_attacking = false
@@ -1093,7 +1136,223 @@ func _try_attack() -> void:
 		else:
 			combo_queued = true
 
+func _check_camera_turn() -> void:
+	if not turn_enabled:
+		return
+	if _is_turning:
+		return
+	if _turn_cooldown_timer > 0.0:
+		return
+	if player_mesh == null or spring_arm_pivot == null:
+		return
+	if ragdoll and ragdoll.is_ragdolled():
+		return
+	if health and health.is_dead:
+		return
+	if is_aiming:
+		return
+	if is_dashing:
+		return
+	if is_attacking and _is_fullbody_action:
+		return
+	if not is_on_floor():
+		return
+	if is_picking_up and _is_fullbody_action:
+		return
+	var input_x := Input.get_action_strength("move_right") - Input.get_action_strength("move_left")
+	var input_z := Input.get_action_strength("move_backwards") - Input.get_action_strength("move_forwards")
+	var is_idle: bool = Vector2(input_x, input_z).length() <= 0.12 and velocity.length() <= 0.45
+	if turn_only_when_idle and not is_idle:
+		# Reset deadzone reference while moving so idle re-entry starts fresh
+		_last_turn_cam_yaw = spring_arm_pivot.rotation.y
+		_turn_reference_initialized = true
+		return
+	var cam_yaw: float = spring_arm_pivot.rotation.y
+	if not _turn_reference_initialized:
+		_last_turn_cam_yaw = cam_yaw
+		_turn_reference_initialized = true
+		return
+	# Deadzone is 45° of camera yaw movement since last turn - triggers ONLY ONCE per 45°
+	var cam_delta: float = angle_difference(_last_turn_cam_yaw, cam_yaw)
+	if abs(rad_to_deg(cam_delta)) < turn_threshold_deg - 0.7:
+		return
+	var dir: int = 1 if cam_delta > 0.0 else -1
+	var anim: String = "Turn_left" if dir > 0 else "Turn_right"
+	# Update reference immediately so next 45° must be NEW movement (single fire per deadzone)
+	_last_turn_cam_yaw = cam_yaw
+	if c11_ap:
+		if not c11_ap.has_animation(anim):
+			# fallback case-insensitive search
+			var want: String = anim.to_lower()
+			for a in c11_ap.get_animation_list():
+				if a.to_lower() == want:
+					anim = a
+					break
+			if not c11_ap.has_animation(anim):
+				# try lower variants turn_right / turn_left
+				for cand in ["turn_right", "turn_left", "Turn_Right", "Turn_Left"]:
+					if c11_ap.has_animation(cand) and cand.to_lower() == want:
+						anim = cand
+						break
+		if not c11_ap.has_animation(anim):
+			# no turn anim available - just snap rotation without anim
+			var step_fallback: float = deg_to_rad(turn_threshold_deg) * dir
+			player_mesh.rotation.y += step_fallback
+			_turn_cooldown_timer = turn_cooldown
+			print("[Turn] no anim found, snapped %.1f deg" % rad_to_deg(step_fallback))
+			return
+	_trigger_turn(dir, anim)
+
+
+func _trigger_turn(dir: int, anim: String) -> void:
+	_is_turning = true
+	var anim_len: float = 0.9
+	if c11_ap and c11_ap.has_animation(anim):
+		anim_len = c11_ap.get_animation(anim).length / max(turn_anim_speed, 0.1)
+	_turn_cooldown_timer = anim_len + turn_cooldown + 0.24
+	var blend_in: float = 0.22
+	var blend_out: float = 0.24
+	# Use skeleton's actual root delta to avoid 90 vs 113 mismatch flicker (Turn_left ~113°, Turn_right ~-106°)
+	var step: float = _get_turn_step(anim, dir)
+	_is_fullbody_action = true
+	# Keep AnimationTree active and use OneShot full-body so pre/mid blend is smooth (no disable flicker)
+	if use_layered_anims and animator and animator.active:
+		var upper_oneshot = animator.tree_root.get_node("UpperOneShot") as AnimationNodeOneShot
+		if upper_oneshot:
+			upper_oneshot.filter_enabled = false
+			upper_oneshot.fadein_time = blend_in
+			upper_oneshot.fadeout_time = blend_out
+		var upper_anim = animator.tree_root.get_node("UpperAction") as AnimationNodeAnimation
+		if upper_anim:
+			upper_anim.animation = StringName(anim)
+		animator.set("parameters/UpperScale/scale", turn_anim_speed)
+		animator.set("parameters/UpperOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_FIRE)
+		c11_current_anim = anim
+		print("[Turn] %s dir=%d via OneShot len=%.2f step=%.1f" % [anim, dir, anim_len, rad_to_deg(step)])
+		# Mesh stays 0 during Turn (skeleton 0->step), then Mesh 0->step cancels skeleton step->0.
+		# CRITICAL: OneShot fadeout is a CROSSFADE that starts at (clip_len - fadeout), NOT after
+		# the clip ends. So the mesh tween must run during that exact same window. Linear easing
+		# mirrors the fadeout's linear blend so mesh + skeleton yaw sums to a constant step.
+		if _turn_tween and _turn_tween.is_valid():
+			_turn_tween.kill()
+		_turn_tween = create_tween()
+		_turn_tween.set_trans(Tween.TRANS_LINEAR)
+		_turn_tween.tween_interval(maxf(anim_len - blend_out, 0.0))
+		_turn_tween.tween_property(player_mesh, "rotation:y", player_mesh.rotation.y + step, blend_out)
+		_turn_tween.tween_callback(func():
+			if not _is_turning:
+				return
+			_is_turning = false
+			_is_fullbody_action = false
+			c11_current_anim = ""
+			if upper_oneshot:
+				upper_oneshot.filter_enabled = true
+				upper_oneshot.fadein_time = 0.08
+				upper_oneshot.fadeout_time = 0.14
+		)
+	else:
+		# Fallback direct AP (no tree) - tween mesh over the AP crossfade to match
+		# (state machine replays Idle at clip end with ~0.2s crossfade; linear matches it)
+		_play_c11(anim, blend_in, turn_anim_speed)
+		c11_current_anim = anim
+		print("[Turn] %s dir=%d direct len=%.2f step=%.1f" % [anim, dir, anim_len, rad_to_deg(step)])
+		if _turn_tween and _turn_tween.is_valid():
+			_turn_tween.kill()
+		_turn_tween = create_tween()
+		_turn_tween.set_trans(Tween.TRANS_LINEAR)
+		_turn_tween.tween_interval(anim_len)
+		_turn_tween.tween_property(player_mesh, "rotation:y", player_mesh.rotation.y + step, 0.2)
+		_turn_tween.tween_callback(func():
+			if not _is_turning:
+				return
+			_is_turning = false
+			_is_fullbody_action = false
+			c11_current_anim = ""
+		)
+
+
+func _get_turn_step(anim: String, dir: int) -> float:
+	# Use skeleton root's actual yaw delta to avoid flicker (113° vs 90° mismatch causes snap back)
+	if c11_ap and c11_ap.has_animation(anim):
+		var a: Animation = c11_ap.get_animation(anim)
+		for i in range(a.get_track_count()):
+			var path: String = str(a.track_get_path(i))
+			if path == "root/Skeleton3D:root.x" and a.track_get_type(i) == Animation.TYPE_ROTATION_3D:
+				var cnt: int = a.track_get_key_count(i)
+				if cnt >= 2:
+					var q0: Quaternion = a.track_get_key_value(i, 0)
+					var q1: Quaternion = a.track_get_key_value(i, cnt - 1)
+					var y0: float = q0.get_euler().y
+					var y1: float = q1.get_euler().y
+					var delta: float = angle_difference(y0, y1)
+					if abs(delta) > deg_to_rad(30.0) and abs(delta) < deg_to_rad(160.0):
+						# Enforce requested direction (swapped mapping already)
+						return abs(delta) * dir
+				break
+	return deg_to_rad(90.0) * dir
+
+
+func _cancel_turn() -> void:
+	if not _is_turning and not _is_fullbody_action:
+		return
+	_is_turning = false
+	_is_fullbody_action = false
+	if _turn_tween and _turn_tween.is_valid():
+		_turn_tween.kill()
+	_turn_tween = null
+	if animator and animator.active and use_layered_anims:
+		# The visual heading during Turn = mesh yaw + skeleton root yaw. ABORT snaps the
+		# skeleton root to 0 instantly, so transfer its current yaw onto the mesh first
+		# or the model pops back toward the original heading mid-turn.
+		_bake_turn_skeleton_yaw_into_mesh()
+		animator.set("parameters/UpperOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_ABORT)
+		# restore filter for punches
+		var upper_oneshot = animator.tree_root.get_node("UpperOneShot") as AnimationNodeOneShot
+		if upper_oneshot:
+			upper_oneshot.filter_enabled = true
+			upper_oneshot.fadein_time = 0.08
+			upper_oneshot.fadeout_time = 0.14
+	if c11_ap:
+		if c11_ap.has_animation("Idle"):
+			c11_ap.play("Idle", 0.18)
+		c11_current_anim = "Idle"
+	_turn_cooldown_timer = turn_cooldown * 0.5
+	print("[Turn] cancelled")
+
+
+func _bake_turn_skeleton_yaw_into_mesh() -> void:
+	if player_mesh == null:
+		return
+	var skel := _get_skeleton()
+	if skel == null:
+		return
+	var bone_idx: int = skel.find_bone("root")
+	if bone_idx < 0:
+		return
+	# Yaw the turn anim applied so far = current pose relative to the rest pose
+	var q_rest: Quaternion = skel.get_bone_rest(bone_idx).basis.get_rotation_quaternion()
+	var q_now: Quaternion = skel.get_bone_pose_rotation(bone_idx)
+	var rel: Quaternion = q_rest.inverse() * q_now
+	player_mesh.rotation.y += rel.get_euler().y
+
+
 func _on_c11_animation_finished(anim_name: String) -> void:
+	# Handle turn finish - timer handles bake/re-enable; avoid snap by not clearing early
+	if anim_name in ["Turn_left", "Turn_right", "turn_left", "turn_right"]:
+		# If turn was cancelled, flags already cleared; otherwise let timer bake 90deg
+		if _is_turning:
+			# keep _is_turning true until timer bakes, just ensure cooldown
+			_turn_cooldown_timer = max(_turn_cooldown_timer, turn_cooldown)
+		else:
+			_is_fullbody_action = false
+			c11_current_anim = ""
+		return
+	# Handle dash finish (clean up full-body state)
+	if is_dashing and anim_name == c11_current_anim:
+		is_dashing = false
+		_is_fullbody_action = false
+		c11_current_anim = ""
+		return
 	# Handle pickup
 	if anim_name.to_lower().begins_with("pick") or anim_name.to_lower() == "pick_up" or anim_name.to_lower() == "pickup":
 		is_picking_up = false
@@ -1138,6 +1397,164 @@ func _on_c11_animation_finished(anim_name: String) -> void:
 			c11_current_anim = ""
 			_has_hit_this_swing = false
 
+func _try_dash() -> bool:
+	if c11_ap == null:
+		print("[Dash] guard: c11_ap null")
+		return false
+	if is_dashing:
+		print("[Dash] guard: already dashing")
+		return false
+	if dash_recovery_timer > 0.0:
+		print("[Dash] guard: in recovery (%.2fs left)" % dash_recovery_timer)
+		return false
+	if not is_on_floor():
+		print("[Dash] guard: not on floor")
+		return false
+	if ragdoll and ragdoll.is_ragdolled():
+		print("[Dash] guard: ragdolled")
+		return false
+	if health and health.is_dead:
+		print("[Dash] guard: dead")
+		return false
+	# If mid-pickup, don't allow dash (block with full body action)
+	if is_picking_up and _is_fullbody_action:
+		print("[Dash] guard: mid-pickup")
+		return false
+	if Input.is_action_pressed("run"):
+		print("[Dash] guard: sprinting")
+		return false
+	var has_dodge: bool = c11_ap.has_animation("Dodge_forward")
+	print("[Dash] has Dodge_forward: %s" % has_dodge)
+	# Decide direction: dominant input axis, else camera forward
+	var dir: Vector3 = _compute_dash_direction()
+	if dir.length() < 0.01:
+		dir = _compute_aim_dir()
+	dir.y = 0
+	if dir.length() < 0.01:
+		dir = player_mesh.global_basis.z if player_mesh else Vector3.FORWARD
+	dir = dir.normalized()
+	# Cancel attack if within cancel window (no-op if not attacking)
+	_cancel_attack_for_dash()
+	# Detect diagonal: W+A/W+D/S+A/S+D — both axes active
+	var _ix_diag: float = Input.get_action_strength("move_right") - Input.get_action_strength("move_left")
+	var _iz_diag: float = Input.get_action_strength("move_backwards") - Input.get_action_strength("move_forwards")
+	_dash_is_diagonal = abs(_ix_diag) > 0.1 and abs(_iz_diag) > 0.1
+	# Keep body strafe-locked by default; diagonal dashes will rotate in _physics_process
+	dash_direction = dir
+	dash_timer = dash_duration
+	dash_recovery_timer = dash_duration + dash_recovery
+	is_dashing = true
+	# Pick directional dash anim based on dominant axis (4 cardinal)
+	var anim: String = _pick_dash_anim(dir)
+	dash_anim_speed = dash_anim_speed_scale
+	# Play as full-body action via the layered OneShot (filter disabled for full-body override)
+	if use_layered_anims and animator and animator.active:
+		# Configure upper leaf for dash, set scale, then disable filter so it overrides legs
+		var upper_anim_node = animator.tree_root.get_node("UpperAction") as AnimationNodeAnimation
+		if upper_anim_node:
+			upper_anim_node.animation = StringName(anim)
+		animator.set("parameters/UpperScale/scale", dash_anim_speed)
+		var upper_node = animator.tree_root.get_node("UpperOneShot")
+		if upper_node and upper_node is AnimationNodeOneShot:
+			upper_node.filter_enabled = false
+			upper_node.fadein_time = 0.06
+			upper_node.fadeout_time = 0.12
+		animator.set("parameters/UpperOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_FIRE)
+		_is_fullbody_action = true
+	else:
+		# Direct AnimationPlayer mode (no tree): just play it
+		_play_c11(anim, 0.06, dash_anim_speed)
+	c11_current_anim = anim
+	print("[Dash] %s dir=(%.2f,%.2f) speed=%.1f" % [anim, dir.x, dir.z, dash_speed])
+	return true
+
+func _compute_dash_direction() -> Vector3:
+	var ix: float = Input.get_action_strength("move_right") - Input.get_action_strength("move_left")
+	var iz: float = Input.get_action_strength("move_backwards") - Input.get_action_strength("move_forwards")
+	var v: Vector2 = Vector2(ix, iz)
+	if v.length() < 0.1:
+		return Vector3.ZERO
+	# Rotate input by camera yaw so dash is camera-relative
+	var yaw: float = spring_arm_pivot.rotation.y if spring_arm_pivot else 0.0
+	var world: Vector3 = Vector3(v.x, 0, v.y).rotated(Vector3.UP, yaw)
+	world.y = 0
+	if world.length() < 0.01:
+		return Vector3.ZERO
+	return world.normalized()
+
+func _pick_dash_anim(dir: Vector3) -> String:
+	# Diagonal dashes (W+A/W+D/S+A/S+D) always map to Dodge_forward (W diagonal)
+	# or Dodge_backward (S diagonal) and will rotate the body. Cardinals keep
+	# the 4-way dominant-axis mapping.
+	var ix := Input.get_action_strength("move_right") - Input.get_action_strength("move_left")
+	var iz := Input.get_action_strength("move_backwards") - Input.get_action_strength("move_forwards")
+	# If no input, convert world dash dir to camera-local (inverse yaw) so
+	# dir=(world) correctly maps to ix/iz. Without this, world X/Z was
+	# misinterpreted as input X/Z and always biased toward forward.
+	if abs(ix) < 0.05 and abs(iz) < 0.05:
+		var yaw: float = spring_arm_pivot.rotation.y if spring_arm_pivot else 0.0
+		var local_dir: Vector3 = Vector3(dir.x, 0, dir.z).rotated(Vector3.UP, -yaw)
+		ix = local_dir.x
+		iz = local_dir.z
+		# Still no direction (e.g. zero dir) -> default forward
+		if abs(ix) < 0.05 and abs(iz) < 0.05:
+			ix = 0.0
+			iz = -1.0
+	# Diagonal: both axes active -> forward diagonal = Dodge_forward, backward diagonal = Dodge_backward
+	if abs(ix) > 0.1 and abs(iz) > 0.1:
+		var anim_diag: String = "Dodge_forward" if iz < 0.0 else "Dodge_backward"
+		# Fallback if missing, otherwise return directly (no dominant-axis check)
+		if c11_ap and not c11_ap.has_animation(anim_diag):
+			for cand in ["Dodge_forward", "Dodge_backward", "Dodge_right", "Dodge_left"]:
+				if c11_ap.has_animation(cand):
+					anim_diag = cand
+					break
+		print("[Dash] pick ix=%.2f iz=%.2f -> %s (diagonal)" % [ix, iz, anim_diag])
+		return anim_diag
+	var v := Vector2(ix, iz)
+	var anim: String = "Dodge_forward"
+	# Dominant axis decides cardinal — avoids forward always winning on diagonals
+	if abs(v.x) > abs(v.y):
+		anim = "Dodge_right" if v.x > 0.0 else "Dodge_left"
+	else:
+		# iz < 0 is forward (W), iz > 0 is backward (S)
+		anim = "Dodge_forward" if v.y < 0.0 else "Dodge_backward"
+	# Fall back to a known animation if the chosen name doesn't exist on the rig
+	if c11_ap and not c11_ap.has_animation(anim):
+		var found: bool = false
+		for cand in ["Dodge_forward", "Dodge_backward", "Dodge_right", "Dodge_left"]:
+			if c11_ap.has_animation(cand):
+				anim = cand
+				found = true
+				break
+		if not found:
+			if c11_ap.has_animation("running"):
+				anim = "running"
+			else:
+				anim = "Idle"
+	print("[Dash] pick ix=%.2f iz=%.2f -> %s" % [ix, iz, anim])
+	return anim
+
+func _cancel_attack_for_dash() -> void:
+	if not is_attacking:
+		return
+	# Only cancel within the configured cancel window (mid-attack)
+	if _attack_timer > dash_cancel_attack_window:
+		return
+	# Abort current combo swing
+	is_attacking = false
+	_upper_action_active = false
+	_is_fullbody_action = false
+	combo_queued = false
+	_has_hit_this_swing = false
+	_hitbox_active = false
+	if hitbox_main: hitbox_main.set("active", false)
+	if hitbox_kick: hitbox_kick.set("active", false)
+	# Abort upper OneShot so it stops mixing into dash
+	if use_layered_anims and animator and animator.active:
+		animator.set("parameters/UpperOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_ABORT)
+	_lunge_velocity = Vector3.ZERO
+
 func _toggle_hitbox_debug() -> void:
 	_hitbox_debug_visible = not _hitbox_debug_visible
 	print("[HitboxDebug] %s" % ("ON (visible)" if _hitbox_debug_visible else "OFF (invisible)"))
@@ -1151,7 +1568,33 @@ func _toggle_hitbox_debug() -> void:
 			if dbg2: dbg2.visible = false
 
 func _unhandled_input(event: InputEvent) -> void:
-	# Toggle hitbox debug visibility with ` (grave/backtick) — covers QWERTY/QWERTZ/unicode
+	# Dash on Ctrl. Try multiple keycode paths because Ctrl can come through as either
+	# physical_keycode (4194322 = KEY_LEFT_CTRL) or keycode depending on layout/OS.
+	if event is InputEventKey and event.pressed and not event.echo:
+		var kc: int = event.keycode
+		var pkc: int = event.physical_keycode
+		# Known modifier keycodes:
+		#   4194322 = KEY_LEFT_CTRL, 4194323 = KEY_RIGHT_CTRL
+		#   4194326 = KEY_META (Win/Cmd key) — also reported as Ctrl on some systems
+		#   4194306 = KEY_CTRL (some Godot versions)
+		var is_ctrl: bool = (pkc == 4194322 or pkc == 4194323 or pkc == 4194326
+			or kc == 4194322 or kc == 4194323 or kc == 4194326 or kc == 4194306)
+		if is_ctrl:
+			# Rising-edge latch so holding Ctrl doesn't re-fire dash every frame
+			if not _dash_key_latched:
+				_dash_key_latched = true
+				if _try_dash():
+					get_viewport().set_input_as_handled()
+				else:
+					print("[Dash] _try_dash returned false")
+	# Clear latch on key release so next press re-triggers
+	if event is InputEventKey and not event.pressed:
+		var kc2: int = event.keycode
+		var pkc2: int = event.physical_keycode
+		var is_ctrl_release: bool = (pkc2 == 4194322 or pkc2 == 4194323 or pkc2 == 4194326
+			or kc2 == 4194322 or kc2 == 4194323 or kc2 == 4194326 or kc2 == 4194306)
+		if is_ctrl_release:
+			_dash_key_latched = false
 	if event is InputEventKey and event.pressed and not event.echo:
 		# KEY_QUOTELEFT is the ` key, KEY_ASCIITILDE is ~ (shift+`), also check unicode 96 (`) and 126 (~)
 		if event.keycode == KEY_QUOTELEFT or event.keycode == KEY_ASCIITILDE or event.physical_keycode == 96 or event.unicode == 96 or event.unicode == 126:
@@ -1331,6 +1774,23 @@ func _physics_process(delta: float) -> void:
 			return
 	if Input.is_action_just_pressed("punch") and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_try_attack()
+	# Dash trigger — InputMap action + raw Ctrl keycode fallback (4194322 = KEY_LEFT_CTRL, 4194323 = KEY_RIGHT_CTRL)
+	var dash_pressed: bool = false
+	if Input.is_action_just_pressed("dash") and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		dash_pressed = true
+	if not dash_pressed:
+		# Polled Ctrl/Meta fallback: works even if InputMap action isn't registered yet (no editor restart)
+		# 4194322 = KEY_LEFT_CTRL, 4194323 = KEY_RIGHT_CTRL, 4194326 = KEY_META (some systems)
+		var ctrl_held: bool = Input.is_key_pressed(4194322) or Input.is_key_pressed(4194323) or Input.is_key_pressed(4194326)
+		if ctrl_held:
+			if not _dash_key_latched:
+				_dash_key_latched = true
+				if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+					dash_pressed = true
+		else:
+			_dash_key_latched = false
+	if dash_pressed:
+		_try_dash()
 	# ---- Aiming (hold RMB) ---- 
 	var should_aim: bool = Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not is_picking_up
 	if should_aim != is_aiming:
@@ -1345,6 +1805,25 @@ func _physics_process(delta: float) -> void:
 		_stun_timer -= delta
 	if _hit_confirm_timer > 0.0:
 		_hit_confirm_timer -= delta
+	if dash_recovery_timer > 0.0:
+		dash_recovery_timer -= delta
+	if _turn_cooldown_timer > 0.0:
+		_turn_cooldown_timer -= delta
+	# Turning can be cancelled by walking/sprint/punch/jump/dash - before checking new turn
+	if _is_turning:
+		var ix_c := Input.get_action_strength("move_right") - Input.get_action_strength("move_left")
+		var iz_c := Input.get_action_strength("move_backwards") - Input.get_action_strength("move_forwards")
+		var has_move_input := Vector2(ix_c, iz_c).length() > 0.12
+		var cancel_by_punch := Input.is_action_just_pressed("punch")
+		var cancel_by_jump := Input.is_action_just_pressed("jump")
+		var cancel_by_dash := Input.is_action_just_pressed("dash")
+		# Also raw Ctrl keys for dash
+		if not cancel_by_dash:
+			cancel_by_dash = Input.is_key_pressed(4194322) or Input.is_key_pressed(4194323)
+		if has_move_input or cancel_by_punch or cancel_by_jump or cancel_by_dash:
+			_cancel_turn()
+	# Check 45deg camera turn threshold -> triggers Turn_left/Turn_right
+	_check_camera_turn()
 	# Combo reset window
 	if not is_attacking and combo_reset_timer > 0.0:
 		combo_reset_timer -= delta
@@ -1414,12 +1893,32 @@ func _physics_process(delta: float) -> void:
 	# ---- Horizontal velocity ----
 	var target_x := move_direction.x * speed * stun_mult
 	var target_z := move_direction.z * speed * stun_mult
-	if is_on_floor():
-		velocity.x = lerp(velocity.x, target_x, 0.28)
-		velocity.z = lerp(velocity.z, target_z, 0.28)
+	# ---- Dash movement state (overrides locomotion while active) ----
+	if is_dashing:
+		# Lock horizontal velocity to dash direction for the full burst
+		velocity.x = dash_direction.x * dash_speed
+		velocity.z = dash_direction.z * dash_speed
+		dash_timer -= delta
+		if dash_timer <= 0.0:
+			is_dashing = false
+			_is_fullbody_action = false
+			c11_current_anim = ""
+		# Dash bypasses normal locomotion lerp entirely
+		pass
+	elif dash_recovery_timer > 0.0:
+		# Brief slowdown before full control returns — still biased to dash dir
+		var decay: float = clampf(1.0 - (delta / maxf(dash_recovery, 0.001)), 0.0, 1.0)
+		var recovery_speed: float = dash_speed * decay
+		# Blend back to target locomotion
+		velocity.x = lerp(dash_direction.x * recovery_speed, target_x, 0.18)
+		velocity.z = lerp(dash_direction.z * recovery_speed, target_z, 0.18)
 	else:
-		velocity.x = lerp(velocity.x, target_x, 0.16)
-		velocity.z = lerp(velocity.z, target_z, 0.16)
+		if is_on_floor():
+			velocity.x = lerp(velocity.x, target_x, 0.28)
+			velocity.z = lerp(velocity.z, target_z, 0.28)
+		else:
+			velocity.x = lerp(velocity.x, target_x, 0.16)
+			velocity.z = lerp(velocity.z, target_z, 0.16)
 	# Apply lunge (only on ground, during attack)
 	if is_attacking and is_on_floor() and _lunge_velocity.length() > 0.1:
 		velocity.x += _lunge_velocity.x * delta * 11.0
@@ -1439,7 +1938,35 @@ func _physics_process(delta: float) -> void:
 	if player_mesh and spring_arm_pivot:
 		var has_input: bool = move_direction.length() > 0.1
 		var is_sprinting_now := Input.is_action_pressed("run") and velocity.length() > 0.5 and not is_aiming
-		if is_attacking and _is_fullbody_action:
+		if _is_turning:
+			# Turning tween drives rotation - don't override. Still update upper look.
+			_clear_upper_skeleton_look(delta)
+			# keep hitbox etc handled below; skip normal rotation
+			pass
+		elif is_dashing:
+			if _dash_is_diagonal:
+				# Diagonal dash: W+A/W+D face dash dir (forward diagonals),
+				# S+A/S+D face the opposite forward diagonal (S+A -> W+D, S+D -> W+A)
+				# so Dodge_backward doesn't turn the back to camera.
+				var yaw: float = spring_arm_pivot.rotation.y if spring_arm_pivot else 0.0
+				var local_diag: Vector3 = dash_direction.rotated(Vector3.UP, -yaw)
+				var is_back_diag: bool = local_diag.z > 0.05 # iz >0 = S
+				var face_dir: Vector3 = dash_direction
+				if is_back_diag:
+					face_dir = -dash_direction # flip: S+A -> forward+right, S+D -> forward+left
+				var target_yaw_diag: float = atan2(face_dir.x, face_dir.z)
+				var rot_speed: float = sprint_rotation_speed * 1.6
+				player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, target_yaw_diag, rot_speed * delta)
+				if abs(angle_difference(player_mesh.rotation.y, target_yaw_diag)) < 0.02:
+					player_mesh.rotation.y = target_yaw_diag
+			else:
+				# Cardinal / idle dash: keep strafe-locked (no rotation) — same as walking
+				var cam_yaw_dash: float = spring_arm_pivot.rotation.y + YAW_OFFSET
+				if instant_strafe_lock:
+					player_mesh.rotation.y = cam_yaw_dash
+				else:
+					player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, cam_yaw_dash, strafe_rotation_speed * delta)
+		elif is_attacking and _is_fullbody_action:
 			# Standing / kick - full body faces target (head-to-toe)
 			var aim_dir_full := _compute_aim_dir()
 			if aim_camera and is_instance_valid(aim_camera):
@@ -1485,12 +2012,17 @@ func _physics_process(delta: float) -> void:
 			elif is_sprinting_now and has_input:
 				var target_angle := atan2(move_direction.x, move_direction.z)
 				player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, target_angle, sprint_rotation_speed * delta)
-			else:
+			elif has_input:
+				# Walking / strafe: keep original strafe-locked follow (not idle)
 				var cam_yaw := spring_arm_pivot.rotation.y + YAW_OFFSET
 				if instant_strafe_lock:
 					player_mesh.rotation.y = cam_yaw
 				else:
 					player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, cam_yaw, strafe_rotation_speed * delta)
+			else:
+				# IDLE: HOLD yaw - don't follow camera continuously.
+				# Rotation only happens via 45deg threshold turn (Turn_left/Turn_right).
+				pass
 	# ---- Keep hitbox in front of character, rotate with mesh (world-correct side) ---
 	if hitbox_main and player_mesh:
 		var fwd: Vector3 = player_mesh.global_basis.z
@@ -1660,6 +2192,9 @@ func play_pick_throw_combo(anim_name: String, speed: float = 1.25) -> void:
 		_play_c11(anim_name, 0.1, speed)
 
 func animate(delta: float) -> void:
+	# Turn-in-place is exclusive - don't let Idle/Walk override Turn_left/Turn_right
+	if _is_turning or (_is_fullbody_action and c11_current_anim in ["Turn_left", "Turn_right", "turn_left", "turn_right"]):
+		return
 	# --- Layered mode: lower body always follows locomotion, upper via OneShot ---
 	if use_layered_anims and animator and animator.active:
 		# Keep all WalkSpace animations at walk_anim_speed (125%) without touching movement speed
