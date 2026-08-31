@@ -7,6 +7,7 @@ const EquipmentCls = preload("res://Scripts/Item/Equipment.gd")
 const InventoryCls = preload("res://Scripts/Item/Inventory.gd")
 const RagdollCls = preload("res://Scripts/Combat/RagdollController.gd")
 const GrabberCls = preload("res://Scripts/Combat/RagdollGrabber.gd")
+const ThrownItemCls = preload("res://Scripts/Item/ThrownItem.gd")
 ## Player.gd — Third-person CharacterBody3D controller + SATISFYING COMBAT
 ## Features:
 ##  - Over-the-shoulder camera via SpringArmPivot (Node3D) + SpringArm3D + Camera3D
@@ -89,6 +90,11 @@ var aim_direction: Vector3 = Vector3.FORWARD
 # --- Hand Hold (single HAND slot) ---
 const HOLD_ANIM: String = "UpperBody_ITEMHOLD"
 const USE_ANIM: String = "UpperBody_ITEMUSE"
+# --- Throw anims (windup while holding G, release on button up) ---
+const THROWSTART_ANIM: String = "UpperBody_THROWSTART"
+const THROWEND_ANIM: String = "UpperBody_THROWEND"
+const THROW_HOLD_MARGIN: float = 0.06 # freeze this many seconds before THROWSTART ends to hold the pose
+const THROW_HOLD_FREEZE_SCALE: float = 0.0001 # near-zero time scale = frozen frame (OneShot never auto-fades)
 var held_item: ItemData = null
 var held_instance: Node3D = null
 var hand_attachment: BoneAttachment3D = null
@@ -97,6 +103,18 @@ var _is_using_item: bool = false
 var _use_timer: float = 0.0
 var _hold_attach_tween: Tween = null
 var _hand_bone_name: String = "hand.r"
+
+# --- Throw Charge (physics) ---
+var _is_charging_throw: bool = false
+var _throw_charge_time: float = 0.0
+var _throw_power: float = 0.0 # 0..1 (0.01 = 1%, 1.0=100%)
+var _throw_shake_phase: float = 0.0
+var _throw_hand_base_pos: Vector3 = Vector3.ZERO
+var _throw_hand_has_base: bool = false
+var _throw_charge_started_with_key: bool = false
+var _throw_start_active: bool = false # THROWSTART playing via UpperOneShot
+var _throw_start_holding: bool = false # THROWSTART finished — frozen at end frame until release
+var _throw_start_len: float = 0.0
 
 # --- Dash (Ctrl) ---
 var is_dashing: bool = false
@@ -160,6 +178,17 @@ var _turn_reference_initialized: bool = false
 @export var target_snap_range: float = 8.0 # was 6.0 - increased to prevent whiffing at edge
 @export var combo_chain_window: float = 0.22 # how early before end you can queue (s)
 @export var whiff_recovery_mult: float = 1.15 # whiff = longer recovery visual
+
+@export_group("Throw Physics")
+@export var throw_max_charge_time: float = 1.15 # seconds holding G to reach 100% (8-10m)
+@export var throw_min_speed: float = 0.95 # 1% power — almost dropped (0.3-0.8m) — lighter than before
+@export var throw_max_speed: float = 8.9 # 100% power — 8-10m (tuned for 26deg arc, g=9.8, y0~1.0) — was 9.6 gave 11.7, 8.9 should give ~10
+@export var throw_upward_angle_deg: float = 26.0 # arc angle for physics throw
+@export var throw_hand_forward_offset: float = 0.35 # spawn slightly in front of hand
+@export var throw_angular_tumble: float = 10.0
+@export var throw_shake_min: float = 0.14 # light shake at 1% — visible but gentle
+@export var throw_shake_max: float = 0.48 # stronger shake at 100% — more intense but not nauseating
+@export var throw_release_anim_speed: float = 1.35
 
 const ANIMATION_BLEND: float = 9.0 # lower = smoother Idle<->Walk<->Run blend (was 7.0, snapped)
 
@@ -466,11 +495,13 @@ func _setup_c11_if_present() -> void:
 					if abs(first.x - last.x) > 0.005 or abs(first.z - last.z) > 0.005:
 						run_anim.track_set_key_value(tidx, cnt - 1, Vector3(first.x, last.y, first.z))
 	ap.playback_default_blend_time = 0.18 # smoother crossfade for all walks (was 0.08, snapped)
-	for n in COMBO_ANIMS + ["jump_start", "Landing", "Landing_hard", "pick_up", "pickup", "Pick_up", "PickUp"]:
+	for n in COMBO_ANIMS + ["jump_start", "Landing", "Landing_hard", "pick_up", "pickup", "Pick_up", "PickUp", "throw", "Throw"]:
 		if ap.has_animation(n):
 			ap.get_animation(n).loop_mode = Animation.LOOP_NONE
 	for anim_name in ap.get_animation_list():
 		if anim_name.to_lower().begins_with("pick"):
+			ap.get_animation(anim_name).loop_mode = Animation.LOOP_NONE
+		if "throw" in anim_name.to_lower():
 			ap.get_animation(anim_name).loop_mode = Animation.LOOP_NONE
 	# Dodge dash animations must be one-shot, not looping
 	for dodge_name in ["Dodge_forward", "Dodge_backward", "Dodge_right", "Dodge_left"]:
@@ -823,15 +854,37 @@ func drop_held_item() -> bool:
 	if not _is_holding or held_item == null:
 		print("[HandHold] No item to drop")
 		return false
+	# If we were charging a throw, cancel charge visual
+	if _is_charging_throw:
+		_cancel_throw_charge()
+	# Default light throw ~5% power (almost dropped) — physics based
+	var fallback_power: float = 0.05
+	# If drop is called programmatically (InventoryUI, test), treat as minimal power light throw
+	return _throw_held_item(fallback_power)
+
+func throw_held_item(power_01: float) -> bool:
+	# Public helper to throw with explicit 0..1 power (0.01=1%, 1.0=100%)
+	if not _is_holding or held_item == null:
+		return false
+	return _throw_held_item(clampf(power_01, 0.01, 1.0))
+
+func _throw_held_item(power: float) -> bool:
+	if not _is_holding or held_item == null:
+		return false
 	var data := held_item
-	# Remove from inventory HAND
+	power = clampf(power, 0.01, 1.0)
+	# Remove from inventory HAND first so we don't immediately re-block
 	if inventory and inventory.has_method("remove_item"):
 		inventory.remove_item(data)
 	held_item = null
 	_exit_hold_state()
 	_detach_held_visual()
-	_spawn_pickup_from_hand(data)
-	print("[HandHold] Dropped '%s' from hand" % data.display_name)
+	# Spawn physics thrown item with distance 0.5m..10m mapping
+	_spawn_thrown_item(data, power)
+	# Play release throw animation — bone-filtered: upper when walking, full-body when standing
+	_play_throw_end_anim()
+	_cancel_throw_charge() # clear shake
+	print("[Throw] Threw '%s' power=%.0f%%" % [data.display_name, power*100.0])
 	return true
 
 func _spawn_pickup_from_hand(data: ItemData) -> void:
@@ -936,6 +989,325 @@ func _spawn_pickup_from_hand(data: ItemData) -> void:
 			print("[HandHold] Spawned pickup '%s' at %s" % [data.display_name, str(spawn_pos)])
 		else:
 			push_warning("[HandHold] No level to spawn pickup")
+
+# ============================================================
+# Physics Throw — charge, shake, distance, spawn
+# ============================================================
+func _get_throw_anim_name() -> String:
+	# Legacy "throw" anim — fallback only when THROWSTART/THROWEND are missing
+	if c11_ap == null:
+		return ""
+	# Prefer exact "throw" lower
+	if c11_ap.has_animation("throw"):
+		return "throw"
+	# case-insensitive search (exclude the new start/end anims)
+	for n in c11_ap.get_animation_list():
+		if n == THROWSTART_ANIM or n == THROWEND_ANIM:
+			continue
+		if n.to_lower() == "throw":
+			return n
+	for n in c11_ap.get_animation_list():
+		if n == THROWSTART_ANIM or n == THROWEND_ANIM:
+			continue
+		if "throw" in n.to_lower():
+			return n
+	return ""
+
+func _is_moving_for_throw() -> bool:
+	var ix := Input.get_action_strength("move_right") - Input.get_action_strength("move_left")
+	var iz := Input.get_action_strength("move_backwards") - Input.get_action_strength("move_forwards")
+	var input_moving: bool = Vector2(ix, iz).length() > 0.12
+	var vel_moving: bool = velocity.length() > 0.18
+	return input_moving or vel_moving
+
+func _fire_upper_shot(anim: String, speed: float, fadein: float, fadeout: float) -> void:
+	# Fires one upper-layer one-shot; bone filtered when walking, full body when standing.
+	# FIRE on an already-active OneShot restarts it from frame 0 at full weight (no re-fade-in),
+	# so swapping a held THROWSTART into THROWEND on release is instant.
+	if c11_ap == null or not c11_ap.has_animation(anim):
+		push_warning("[Throw] Missing anim '%s' on %s" % [anim, str(c11_ap)])
+		return
+	if use_layered_anims and animator and animator.active:
+		var upper_anim_node = animator.tree_root.get_node("UpperAction") as AnimationNodeAnimation
+		if upper_anim_node:
+			upper_anim_node.animation = StringName(anim)
+		animator.set("parameters/UpperScale/scale", speed)
+		var upper_node = animator.tree_root.get_node("UpperOneShot") as AnimationNodeOneShot
+		if upper_node:
+			var is_moving: bool = _is_moving_for_throw()
+			upper_node.filter_enabled = is_moving # moving -> filtered upper only; standing -> full body
+			upper_node.fadein_time = fadein
+			upper_node.fadeout_time = fadeout
+			_is_fullbody_action = not is_moving
+		animator.set("parameters/UpperOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_FIRE)
+	else:
+		# Direct AnimationPlayer mode: non-looping anims hold their last frame natively
+		_play_c11(anim, 0.08, speed)
+	_upper_action_active = true
+	c11_current_anim = anim
+
+func _play_throw_start_anim() -> void:
+	# Hold G — play the windup; _update_throw_charge freezes it at the end frame
+	_throw_start_active = false
+	_throw_start_holding = false
+	if c11_ap == null or not c11_ap.has_animation(THROWSTART_ANIM):
+		push_warning("[Throw] Missing '%s' — no windup anim (charge/shake still works)" % THROWSTART_ANIM)
+		return
+	_throw_start_len = c11_ap.get_animation(THROWSTART_ANIM).length
+	# fadeout ~0: the hold must engage before the OneShot's end-of-anim auto-fade kicks in
+	_fire_upper_shot(THROWSTART_ANIM, 1.0, 0.08, 0.001)
+	_throw_start_active = true
+	print("[Throw] THROWSTART fired (len %.2fs)" % _throw_start_len)
+
+func _play_throw_end_anim() -> void:
+	# Release G (or programmatic throw) — play the release motion, bone filtered
+	var was_holding: bool = _throw_start_holding
+	_throw_start_active = false
+	_throw_start_holding = false
+	var anim: String = THROWEND_ANIM
+	if c11_ap == null or not c11_ap.has_animation(anim):
+		anim = _get_throw_anim_name()
+		if anim == "":
+			push_warning("[Throw] No throw anim available on %s" % str(c11_ap))
+			return
+	_fire_upper_shot(anim, throw_release_anim_speed, 0.08, 0.16)
+	if c11_ap.has_animation(anim):
+		_attack_total = c11_ap.get_animation(anim).length / throw_release_anim_speed
+		_attack_timer = 0.0
+		# Ensure flags clear after the release finishes (layered OneShot doesn't reliably signal)
+		var tlen_throw: float = _attack_total
+		get_tree().create_timer(tlen_throw + 0.16).timeout.connect(func():
+			if not _throw_start_active:
+				_upper_action_active = false
+				_is_fullbody_action = false
+				c11_current_anim = ""
+				_attack_timer = 0.0
+		)
+	print("[Throw] THROWEND fired (was_holding=%s)" % str(was_holding))
+
+func _compute_throw_speed(power: float) -> float:
+	# Linear lerp, with slight ease for feel: low power grows slowly, high snaps
+	var t: float = clampf(power, 0.01, 1.0)
+	# ease: smoothstep for more control near mid? Keep linear for predictable 10m
+	return lerpf(throw_min_speed, throw_max_speed, t)
+
+func _compute_throw_dir(power: float) -> Vector3:
+	# Base forward from camera aim or mesh forward
+	var fwd: Vector3 = Vector3.ZERO
+	if aim_camera and is_instance_valid(aim_camera):
+		# Use aim point direction blended with camera forward for throw accuracy
+		var aim_pt := _compute_aim_point()
+		fwd = _aim_dir_from_point(aim_pt)
+	else:
+		fwd = _compute_aim_dir()
+	if player_mesh:
+		# Slight bias to mesh forward if aim is behind
+		var mesh_fwd := player_mesh.global_basis.z
+		mesh_fwd.y = 0
+		if mesh_fwd.length() > 0.1:
+			mesh_fwd = mesh_fwd.normalized()
+			# If aim is wildly off from mesh forward (behind), use mesh
+			if rad_to_deg(fwd.angle_to(mesh_fwd)) > 85.0:
+				fwd = mesh_fwd
+	fwd.y = 0
+	if fwd.length() < 0.1:
+		fwd = Vector3.FORWARD.rotated(Vector3.UP, spring_arm_pivot.rotation.y if spring_arm_pivot else 0.0)
+	fwd = fwd.normalized()
+	# Upward arc: decompose into horizontal + vertical using throw_upward_angle
+	var theta: float = deg_to_rad(throw_upward_angle_deg)
+	var horiz: Vector3 = fwd
+	var up: Vector3 = Vector3.UP
+	# Slightly more vertical at higher power for better arc (optional)
+	var vertical_boost: float = lerpf(0.0, 0.06, power) # extra lift at 100%
+	var dir: Vector3 = horiz * cos(theta) + up * (sin(theta) + vertical_boost)
+	return dir.normalized()
+
+func _get_hand_spawn_pos(fwd: Vector3, power: float = -1.0) -> Vector3:
+	var pos: Vector3 = global_position + Vector3(0, 0.95, 0)
+	if hand_attachment and is_instance_valid(hand_attachment):
+		pos = hand_attachment.global_position
+	elif player_mesh:
+		pos = player_mesh.global_position + Vector3(0, 1.05, 0)
+	# offset slightly forward + up from hand
+	var p: float = power if power >= 0.0 else _throw_power
+	var up_off: float = 0.12 + clampf(p, 0.0, 1.0) * 0.06
+	pos += fwd * throw_hand_forward_offset
+	pos += Vector3.UP * up_off
+	return pos
+
+func _spawn_thrown_item(data: ItemData, power: float) -> void:
+	var fwd_for_spawn: Vector3 = _compute_aim_dir()
+	if aim_camera:
+		fwd_for_spawn = _aim_dir_from_point(_compute_aim_point())
+	fwd_for_spawn.y = 0
+	if fwd_for_spawn.length() < 0.1:
+		fwd_for_spawn = Vector3.FORWARD.rotated(Vector3.UP, spring_arm_pivot.rotation.y if spring_arm_pivot else 0.0)
+	fwd_for_spawn = fwd_for_spawn.normalized()
+	var spawn_pos: Vector3 = _get_hand_spawn_pos(fwd_for_spawn, power)
+	var throw_dir: Vector3 = _compute_throw_dir(power)
+	var speed: float = _compute_throw_speed(power)
+	# Add thrower's horizontal velocity (30%) for momentum carry while running
+	var carry: Vector3 = velocity
+	carry.y = 0
+	if carry.length() > 0.5 and power > 0.3:
+		throw_dir = (throw_dir * speed + carry * 0.32).normalized()
+		# keep speed magnitude? Add slight boost
+		speed = speed + carry.length() * 0.18
+	var tb := ThrownItemCls.new()
+	tb.name = "Thrown_%s" % data.id
+	var level = get_tree().current_scene
+	if level == null:
+		level = get_tree().root
+	level.add_child(tb)
+	tb.global_position = spawn_pos
+	tb.setup(data, spawn_pos, throw_dir, speed, power, self)
+	# Prevent immediate self-collision with thrower (would bounce off player capsule and kill distance)
+	if tb.has_method("add_collision_exception_with"):
+		tb.add_collision_exception_with(self)
+	# Also add exception with player's hurtbox/hitbox bodies if present
+	if hurtbox and hurtbox is CollisionObject3D:
+		tb.add_collision_exception_with(hurtbox)
+	if hitbox_main and hitbox_main is CollisionObject3D:
+		tb.add_collision_exception_with(hitbox_main)
+	# Force physics velocity after added to tree (setup already did but re-apply)
+	tb.linear_velocity = throw_dir.normalized() * speed
+	tb.angular_velocity = Vector3(randf_range(-1,1), randf_range(-1,1), randf_range(-1,1)).normalized() * (throw_angular_tumble * (0.6 + power*0.8))
+	print("[Throw] Spawned '%s' at %s power %.0f%% speed %.2f dir %s vel %s" % [data.display_name, str(spawn_pos), power*100.0, speed, str(throw_dir), str(tb.linear_velocity)])
+	# Small camera kick on release
+	if spring_arm_pivot and spring_arm_pivot.has_method("add_trauma"):
+		var kick: float = lerpf(0.08, 0.28, power)
+		spring_arm_pivot.add_trauma(kick)
+		spring_arm_pivot.kick_fov(power * 3.0)
+
+func _start_throw_charge() -> bool:
+	if not is_holding_item():
+		return false
+	if _is_charging_throw:
+		return true
+	if is_picking_up and _is_fullbody_action:
+		return false
+	if ragdoll and ragdoll.is_ragdolled():
+		return false
+	if health and health.is_dead:
+		return false
+	_is_charging_throw = true
+	_throw_charge_time = 0.0
+	_throw_power = 0.01
+	_throw_shake_phase = 0.0
+	# Track if started via actual key hold for polling auto-release
+	_throw_charge_started_with_key = Input.is_key_pressed(KEY_G) or Input.is_physical_key_pressed(KEY_G) or Input.is_key_pressed(KEY_Q) or Input.is_physical_key_pressed(KEY_Q) or Input.is_key_pressed(71) or Input.is_key_pressed(81)
+	if hand_attachment and is_instance_valid(hand_attachment):
+		_throw_hand_base_pos = hand_attachment.position
+		_throw_hand_has_base = true
+	else:
+		_throw_hand_has_base = false
+	print("[Throw] Charge START holding '%s' with_key=%s" % [held_item.display_name, str(_throw_charge_started_with_key)])
+	# Windup anim — plays through, then holds its final pose until G is released
+	_play_throw_start_anim()
+	return true
+
+func _update_throw_charge(delta: float) -> void:
+	if not _is_charging_throw:
+		return
+	if not is_holding_item():
+		_cancel_throw_charge()
+		return
+	_throw_charge_time += delta
+	_throw_power = clampf(_throw_charge_time / throw_max_charge_time, 0.01, 1.0)
+	_throw_shake_phase += delta * lerpf(14.0, 28.0, _throw_power)
+	# THROWSTART hold: once the windup played out, freeze it at its final pose
+	# (near-zero time scale — the OneShot never reaches its auto-fade window while G is held)
+	if _throw_start_active and not _throw_start_holding and animator and animator.active and _throw_start_len > 0.0:
+		var hold_margin: float = maxf(THROW_HOLD_MARGIN, _throw_start_len * 0.05)
+		if _throw_charge_time >= _throw_start_len - hold_margin:
+			animator.set("parameters/UpperScale/scale", THROW_HOLD_FREEZE_SCALE)
+			_throw_start_holding = true
+			print("[Throw] THROWSTART held at end frame")
+	# Keep bone filter synced with movement while the windup is on screen (walk while charging)
+	if _throw_start_active and animator and animator.active:
+		var upper_node = animator.tree_root.get_node("UpperOneShot") as AnimationNodeOneShot
+		if upper_node:
+			var moving: bool = _is_moving_for_throw()
+			upper_node.filter_enabled = moving
+			_is_fullbody_action = not moving
+	# Progressive shake: camera trauma + hand jitter — 1% light, 100% stronger
+	if spring_arm_pivot:
+		var shake_intensity: float = lerpf(throw_shake_min, throw_shake_max, _throw_power)
+		# Drive trauma directly — override decay so shake is clearly progressive 1%->100%
+		if "trauma" in spring_arm_pivot or spring_arm_pivot.has_method("add_trauma"):
+			var target: float = clampf(shake_intensity * 0.95, 0.0, 1.0)
+			# Use direct assignment for immediate feedback, lerp for smoothness
+			var cur: float = spring_arm_pivot.get("trauma") if "trauma" in spring_arm_pivot else 0.0
+			var new_trauma: float = lerpf(cur, target, clampf(delta * 14.0, 0.0, 1.0))
+			# Also ensure monotonic increase while charging (don't let decay drop below target)
+			if new_trauma < target * 0.85:
+				new_trauma = target * 0.85
+			spring_arm_pivot.set("trauma", clampf(new_trauma, 0.0, 1.0))
+			# Add extra kick for visibility
+			if spring_arm_pivot.has_method("kick_fov"):
+				if fmod(_throw_shake_phase, 0.28) < delta * 2.0:
+					spring_arm_pivot.kick_fov(shake_intensity * 0.12)
+		# Also micro fov kick pulse
+		if spring_arm_pivot.has_method("kick_fov") and fmod(_throw_shake_phase, 0.24) < delta * 2.0:
+			spring_arm_pivot.kick_fov(shake_intensity * 0.18)
+	# Hand jitter visual
+	if hand_attachment and is_instance_valid(hand_attachment) and _throw_hand_has_base:
+		var jitter_amp: float = lerpf(0.004, 0.018, _throw_power) # meters in hand local space
+		# Frequency increases with power
+		var jx: float = sin(_throw_shake_phase * 1.9) * jitter_amp
+		var jy: float = cos(_throw_shake_phase * 2.3) * jitter_amp * 0.7
+		var jz: float = sin(_throw_shake_phase * 1.4 + 0.7) * jitter_amp * 0.9
+		hand_attachment.position = _throw_hand_base_pos + Vector3(jx, jy, jz)
+	# Optional debug every 0.2s
+	#if fmod(_throw_charge_time, 0.2) < delta:
+	#	print("[Throw] charging %.0f%%" % (_throw_power*100.0))
+
+func _cancel_throw_charge() -> void:
+	if not _is_charging_throw:
+		return
+	_is_charging_throw = false
+	_throw_charge_time = 0.0
+	_throw_power = 0.0
+	_throw_shake_phase = 0.0
+	_throw_charge_started_with_key = false
+	# Fade out a held/playing THROWSTART windup when the charge aborts mid-hold
+	if _throw_start_active or _throw_start_holding:
+		_throw_start_active = false
+		_throw_start_holding = false
+		if use_layered_anims and animator and animator.active:
+			animator.set("parameters/UpperScale/scale", 1.0)
+			animator.set("parameters/UpperOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_FADE_OUT)
+	if hand_attachment and is_instance_valid(hand_attachment) and _throw_hand_has_base:
+		# Smooth return to base with tween
+		var tw := create_tween()
+		tw.tween_property(hand_attachment, "position", _throw_hand_base_pos, 0.14).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_throw_hand_has_base = false
+	print("[Throw] Charge CANCEL")
+
+func _release_throw() -> bool:
+	if not _is_charging_throw:
+		return false
+	if not is_holding_item():
+		_cancel_throw_charge()
+		return false
+	var power: float = _throw_power
+	if power < 0.01:
+		power = 0.01
+	# Clamp minimum press time still yields 1% approx dropped
+	var held_data: ItemData = held_item # cache before throw clears
+	var was_charging: bool = _is_charging_throw
+	_is_charging_throw = false # clear before throw to avoid re-entry
+	_throw_charge_time = 0.0
+	_throw_power = 0.0
+	_throw_charge_started_with_key = false
+	# Restore hand pos before spawning (spawn uses hand global pos)
+	if hand_attachment and is_instance_valid(hand_attachment) and _throw_hand_has_base:
+		hand_attachment.position = _throw_hand_base_pos
+	_throw_hand_has_base = false
+	_throw_shake_phase = 0.0
+	if held_data == null:
+		return false
+	return _throw_held_item(power)
 
 func try_use_held_item() -> bool:
 	if not _is_holding or held_item == null:
@@ -1087,8 +1459,15 @@ func _play_upper_action(anim: String, speed_scale: float = 1.0, fadein: float = 
 			var is_moving := Vector2(ix, iz).length() > 0.12 or velocity.length() > 0.12
 			upper_node.filter_enabled = is_moving # moving -> filtered upper only (perfect), standing -> full body head-to-toe
 			_is_fullbody_action = not is_moving
+		elif anim.to_lower() == "throw" or "throw" in anim.to_lower():
+			# spec: throw = upper-body when walking, whole body when standing still (bone filtering)
+			var ix2 := Input.get_action_strength("move_right") - Input.get_action_strength("move_left")
+			var iz2 := Input.get_action_strength("move_backwards") - Input.get_action_strength("move_forwards")
+			var is_moving_throw := Vector2(ix2, iz2).length() > 0.12 or velocity.length() > 0.12
+			upper_node.filter_enabled = is_moving_throw
+			_is_fullbody_action = not is_moving_throw
 		else:
-			# pick_up/throw etc keep filtered upper
+			# pick_up etc keep filtered upper
 			upper_node.filter_enabled = true
 			_is_fullbody_action = false
 	animator.set("parameters/UpperOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_FIRE)
@@ -1673,6 +2052,8 @@ func _do_hurt_flash(is_crit: bool) -> void:
 	tw2.tween_property(player_mesh, "scale", Vector3.ONE, 0.13)
 
 func _try_attack() -> void:
+	if _is_charging_throw:
+		return # block combo while charging throw
 	# If holding usable, redirect to ITEMUSE instead of combo
 	if is_holding_item():
 		if held_item and held_item.is_usable:
@@ -1965,7 +2346,7 @@ func _on_c11_animation_finished(anim_name: String) -> void:
 		return
 	if anim_name not in COMBO_ANIMS:
 		# Also clear throw/punch filtered upper when generic upper finishes
-		if anim_name in ["throw", "beam", "Summon", "NO"]:
+		if anim_name.to_lower() in ["throw", "beam", "summon", "no"] or "throw" in anim_name.to_lower():
 			_upper_action_active = false
 			_is_fullbody_action = false
 			c11_current_anim = ""
@@ -1999,6 +2380,9 @@ func _on_c11_animation_finished(anim_name: String) -> void:
 			_has_hit_this_swing = false
 
 func _try_dash() -> bool:
+	if _is_charging_throw:
+		print("[Dash] guard: charging throw")
+		return false
 	if _is_action_blocked_when_holding("dash"):
 		print("[HandHold] Dash blocked — holding '%s'" % (held_item.display_name if held_item else "item"))
 		return false
@@ -2225,33 +2609,51 @@ func _unhandled_input(event: InputEvent) -> void:
 			if _try_grab_or_pickup():
 				get_viewport().set_input_as_handled()
 				return
-		# Drop held item or Throw (upper-body while walking) with G / Q
-		if event.keycode == KEY_G or event.keycode == KEY_Q:
-			if is_holding_item():
-				# Drop takes priority over throw when holding
-				if event.keycode == KEY_G:
-					drop_held_item()
+		# Physics throw — hold G (or Q) to charge 1%..100% (8-10m), release to throw with throw anim (bone filtered)
+		if event is InputEventKey:
+			var is_g: bool = event.keycode == KEY_G or event.physical_keycode == KEY_G or event.keycode == 71 or event.physical_keycode == 71
+			var is_q: bool = event.keycode == KEY_Q or event.physical_keycode == KEY_Q or event.keycode == 81 or event.physical_keycode == 81
+			if is_g or is_q:
+				if is_holding_item():
+					if event.pressed and not event.echo:
+						# start charging — progressive shake ramps with power
+						if _start_throw_charge():
+							get_viewport().set_input_as_handled()
+						return
+					elif not event.pressed:
+						# release charged throw — maps 1% (~drop) to 100% (10m)
+						if _is_charging_throw:
+							_release_throw()
+							get_viewport().set_input_as_handled()
+							return
+						# fallback: tap without charge tracking (e.g. focus loss) → light throw
+						# if still holding, do minimal throw instead of instant drop
+						if is_holding_item():
+							_throw_held_item(0.06)
+							get_viewport().set_input_as_handled()
+							return
 				else:
-					# Q while holding usable could also trigger use? Keep drop for both
-					drop_held_item()
-				get_viewport().set_input_as_handled()
-				return
-			if c11_ap and c11_ap.has_animation("throw"):
-				if not is_picking_up and not (is_attacking and _is_fullbody_action):
-					is_picking_up = true
-					_is_fullbody_action = false
-					_play_upper_action("throw", 1.45, 0.1, 0.12) if use_layered_anims and animator and animator.active else _play_c11("throw", 0.1, 1.45)
-					var tlen: float = c11_ap.get_animation("throw").length / 1.45
-					get_tree().create_timer(tlen + 0.12).timeout.connect(func(): is_picking_up = false)
-					# TODO: spawn projectile / drop logic can be hooked here
-					print("[Upper] throw while moving")
-				get_viewport().set_input_as_handled()
-				return
+					# Empty-hand throw anim (no item) — quick throw: release motion only
+					if event.pressed and not event.echo:
+						if c11_ap and not is_picking_up and not (is_attacking and _is_fullbody_action):
+							is_picking_up = true
+							_play_throw_end_anim() # bone filtered: upper when walking, full body when standing
+							var tlen: float = (c11_ap.get_animation(THROWEND_ANIM).length / throw_release_anim_speed) if c11_ap.has_animation(THROWEND_ANIM) else 0.3
+							get_tree().create_timer(tlen + 0.14).timeout.connect(func(): is_picking_up = false; _is_fullbody_action = false)
+							print("[Upper] empty throw")
+							get_viewport().set_input_as_handled()
+							return
+					elif not event.pressed:
+						# release of empty throw does nothing
+						pass
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not is_picking_up:
 			_try_attack()
 
 func _try_grab_or_pickup() -> bool:
+	if _is_charging_throw:
+		print("[Throw] Grab blocked while charging")
+		return false
 	if _is_action_blocked_when_holding("grab"):
 		print("[HandHold] Grab blocked while holding '%s'" % held_item.display_name)
 		return false
@@ -2386,9 +2788,13 @@ func _physics_process(delta: float) -> void:
 		# Keep velocity zero; physics bones simulate the body. We still need gravity? Ragdoll handles it via PhysicalBones.
 		# Freeze CharacterBody motion so it doesn't slide; ragdoll bones are separate PhysicsBody3Ds
 		velocity = Vector3.ZERO
+		if _is_charging_throw:
+			_cancel_throw_charge()
 		return
 	if health and health.is_dead:
 		# Dead but not yet ragdolled (fallback) — no movement
+		if _is_charging_throw:
+			_cancel_throw_charge()
 		velocity.x = lerp(velocity.x, 0.0, delta * 6.0)
 		velocity.z = lerp(velocity.z, 0.0, delta * 6.0)
 		velocity.y -= gravity * delta
@@ -2425,6 +2831,30 @@ func _physics_process(delta: float) -> void:
 			_dash_key_latched = false
 	if dash_pressed:
 		_try_dash()
+	# ---- Throw charge update (hold G) — progressive shake 1% light .. 100% stronger ----
+	if _is_charging_throw:
+		_update_throw_charge(delta)
+		# Polling fallback: if player released G/Q without _unhandled_input delivering release (focus loss, etc), auto-fire
+		# Only auto-release via polling if charge was started via real key hold — programmatic test starts skip this
+		if _throw_charge_started_with_key:
+			var g_held := Input.is_key_pressed(KEY_G) or Input.is_physical_key_pressed(KEY_G)
+			var q_held := Input.is_key_pressed(KEY_Q) or Input.is_physical_key_pressed(KEY_Q)
+			# Also accept raw keycodes 71/81 for layouts where mapping differs
+			if not g_held:
+				g_held = Input.is_key_pressed(71) or Input.is_physical_key_pressed(71)
+			if not q_held:
+				q_held = Input.is_key_pressed(81) or Input.is_physical_key_pressed(81)
+			if not g_held and not q_held:
+				# If we were charging and both keys are up, release with current power
+				# Delay 1 frame check to avoid immediate release on press? charge_time >0.05 needed
+				if _throw_charge_time > 0.05:
+					_release_throw()
+				elif _throw_charge_time > 0.0 and not is_holding_item():
+					_cancel_throw_charge()
+		# While charging, block attack/dash to avoid interrupting the aim (but allow walk/sprint)
+		# Slight movement slow (90%) so throw aim is stable
+		# (handled later via speed multiplier)
+
 	# ---- Aiming (hold RMB) ---- 
 	var should_aim: bool = Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not is_picking_up
 	if should_aim != is_aiming:
@@ -2509,6 +2939,9 @@ func _physics_process(delta: float) -> void:
 			speed = run_speed * 0.78 # slightly less slow when running with body
 	else:
 		speed = walk_speed * grab_slow
+	# Slight slow while charging throw (stabilize aim, but still allow walk)
+	if _is_charging_throw:
+		speed *= 0.72
 	# ---- Coyote + Buffer + Gravity ----
 	if is_on_floor():
 		coyote_timer = coyote_time
@@ -2682,6 +3115,8 @@ func _physics_process(delta: float) -> void:
 	# ---- Jump / snap ----
 	var just_landed: bool = is_on_floor() and not was_on_floor
 	var block_jump := is_attacking and (_is_fullbody_action or not use_layered_anims)
+	if _is_charging_throw:
+		block_jump = true
 	if _is_action_blocked_when_holding("jump"):
 		block_jump = true
 	var can_jump := coyote_timer > 0.0 and jump_buffer_timer > 0.0 and not block_jump and _stun_timer <= 0.0 and not _is_using_item
