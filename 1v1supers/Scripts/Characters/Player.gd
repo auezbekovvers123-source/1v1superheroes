@@ -2107,6 +2107,8 @@ func _try_attack() -> void:
 			combo_queued = true
 
 func _check_camera_turn() -> void:
+	if _inventory_ui_open():
+		return # inventory camera orbit would chain-fire turn anims — hold facing
 	if not turn_enabled:
 		return
 	if _is_turning:
@@ -2558,7 +2560,16 @@ func _toggle_hitbox_debug() -> void:
 			var dbg2 = hitbox_kick.get_node_or_null("DBG")
 			if dbg2: dbg2.visible = false
 
+## True while the TAB inventory UI owns the mouse (game keeps running, player input is gated)
+func _inventory_ui_open() -> bool:
+	for ui in get_tree().get_nodes_in_group("inventory_ui"):
+		if ui != self and ui.has_method("is_inventory_open") and ui.call("is_inventory_open"):
+			return true
+	return false
+
 func _unhandled_input(event: InputEvent) -> void:
+	if _inventory_ui_open():
+		return # inventory open — ignore gameplay keys (G/Q/C/F/Ctrl/`)
 	# Dash on Ctrl. Try multiple keycode paths because Ctrl can come through as either
 	# physical_keycode (4194322 = KEY_LEFT_CTRL) or keycode depending on layout/OS.
 	if event is InputEventKey and event.pressed and not event.echo:
@@ -2920,10 +2931,12 @@ func _physics_process(delta: float) -> void:
 		_lunge_velocity = Vector3.ZERO
 	# If stunned, damp inputs
 	var stun_mult: float = 0.08 if _stun_timer > 0.0 else 1.0
-	# ---- Input direction (WASD) ----
+	# ---- Input direction (WASD) — gated while the inventory UI is open ----
+	var ui_open := _inventory_ui_open()
 	var move_direction: Vector3 = Vector3.ZERO
-	move_direction.x = Input.get_action_strength("move_right") - Input.get_action_strength("move_left")
-	move_direction.z = Input.get_action_strength("move_backwards") - Input.get_action_strength("move_forwards")
+	if not ui_open:
+		move_direction.x = Input.get_action_strength("move_right") - Input.get_action_strength("move_left")
+		move_direction.z = Input.get_action_strength("move_backwards") - Input.get_action_strength("move_forwards")
 	if move_direction.length() > 1.0:
 		move_direction = move_direction.normalized()
 	if spring_arm_pivot:

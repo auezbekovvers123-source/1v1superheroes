@@ -72,46 +72,16 @@ func _draw() -> void:
 	var text_col := Color(1, 1, 1, 0.85).lerp(Color.WHITE, _hover_blend)
 	draw_string(font, Vector2((size.x - text_w) / 2.0, size.y - 12), name_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, text_col)
 
-# --- Drag source ---
-
-func _get_drag_data(_at_position: Vector2) -> Variant:
-	if item_data == null:
-		return null
-
-	# Create a glowing circular drag preview matching the sketch socket circle
-	var preview_root := Control.new()
-	var preview := Panel.new()
-	preview.custom_minimum_size = Vector2(52, 52)
-	preview.size = Vector2(52, 52)
-	preview.position = Vector2(-26, -26)
-	
-	var style := StyleBoxFlat.new()
-	style.bg_color = item_data.preview_color
-	style.corner_radius_top_left = 26
-	style.corner_radius_top_right = 26
-	style.corner_radius_bottom_left = 26
-	style.corner_radius_bottom_right = 26
-	style.set_border_width_all(2)
-	style.border_color = Color.WHITE
-	style.shadow_color = Color(1, 1, 1, 0.4)
-	style.shadow_size = 10
-	preview.add_theme_stylebox_override("panel", style)
-	
-	preview_root.add_child(preview)
-	set_drag_preview(preview_root)
-
-	modulate = Color(1, 1, 1, 0.35)
-	drag_started.emit(item_data)
-	return {"item_data": item_data, "source_slot": self}
-
-func _notification(what: int) -> void:
-	if what == NOTIFICATION_DRAG_END:
-		modulate = Color.WHITE
-		drag_ended.emit()
+# --- Drag source (custom drag owned by InventoryUI — bridges 2D tray ↔ 3D sockets) ---
 
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
-		if mb.pressed and mb.button_index == MOUSE_BUTTON_RIGHT and item_data != null:
+		if mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT and item_data != null:
+			# Hand off to InventoryUI's cross-surface drag (works over the 3D rings too)
+			modulate = Color(1, 1, 1, 0.35)
+			drag_started.emit(item_data)
+			accept_event()
+		elif mb.pressed and mb.button_index == MOUSE_BUTTON_RIGHT and item_data != null:
 			item_right_clicked.emit(item_data)
 			accept_event()

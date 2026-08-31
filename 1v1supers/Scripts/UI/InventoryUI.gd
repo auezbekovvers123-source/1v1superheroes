@@ -1,18 +1,19 @@
 extends CanvasLayer
 class_name InventoryUI
-## InventoryUI.gd — Pure Minimalist 3D Interactive Inventory.
-## Features:
-##  - 3D Character in center with real-time breathing Idle animation & physics
-##  - Sockets are glowing circles physically attached to 3D body parts and tracked in screen space
-##  - Drag to rotate character in 360° with smooth inertia
-##  - Sockets smoothly appear / glow when hovering near them
-##  - NO text clutter — pure visual focus on the hero and gear
-##  - Minimalist sketch-style bottom item tray
+## InventoryUI.gd — TAB inventory presented IN THE LIVING GAME WORLD.
+##  - TAB smoothly swings the gameplay camera around to face the character's front
+##    (handled by SpringArmPivot.set_inventory_mode). The game does NOT pause —
+##    physics, cloth sim and the world keep running; only player input is gated.
+##  - Primary inventory (single HAND slot) is flat screen-space UI — a tray at the bottom
+##  - Equip sockets are glowing circular rings rendered in world space, attached
+##    directly to the character model's bones (EquipSocket3D billboard quads)
+##  - Custom drag & drop bridges both surfaces:
+##      tray item (2D)  -> ring (3D)     = equip
+##      ring gear (3D)  -> tray (2D)     = unequip into HAND
+##      click a ring (3D)                = quick-unequip into HAND
 
-const EquipSocketScript = preload("res://Scripts/UI/EquipSocket.gd")
+const EquipSocket3DScript = preload("res://Scripts/UI/EquipSocket3D.gd")
 const InventorySlotScript = preload("res://Scripts/UI/InventorySlot.gd")
-const C11ModelScene = preload("res://Assets/Models/Characters/С11.glb")
-const EquipmentCls = preload("res://Scripts/Item/Equipment.gd")
 
 var player: CharacterBody3D = null
 var inventory: Node = null
@@ -20,39 +21,31 @@ var equipment: Node = null
 
 var _is_open: bool = false
 
-# UI Nodes
+# Screen-space UI
 var _root: Control = null
-var _overlay: ColorRect = null
 var _item_tray: HBoxContainer = null
-var _tray_panel: PanelContainer = null
-var _socket_container: Control = null
+var _ghost: DragGhost = null
 
-# 3D Viewport Nodes
-var _vp_container: SubViewportContainer = null
-var _sub_viewport: SubViewport = null
-var _preview_model_root: Node3D = null
-var _preview_c11: Node3D = null
-var _preview_skeleton: Skeleton3D = null
-var _preview_ap: AnimationPlayer = null
-var _preview_equipment: Equipment = null
-var _preview_camera: Camera3D = null
+# World-space sockets attached to the player model
+var _socket_root: Node3D = null
+var _skeleton: Skeleton3D = null
+var _sockets: Dictionary = {} # slot (int) -> EquipSocket3D
+var _anchors: Dictionary = {} # slot (int) -> Node3D (bone marker)
 
-# 3D Body Attachment Anchors
-var _body_anchors: Dictionary = {} # slot (int) -> Node3D
-
-# Sockets (EquipSlot int -> EquipSocket)
-var _sockets: Dictionary = {}
-
-# 3D Drag-Rotation State
-var _is_dragging_3d: bool = false
-var _rot_velocity: float = 0.0
+# Custom cross-surface drag state
+var _drag_item: ItemData = null
+var _drag_source_socket: EquipSocket3D = null
+var _drag_source_slot: Control = null
+var _drag_active: bool = false
+var _drag_press_pos: Vector2 = Vector2.ZERO
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	layer = 100
+	add_to_group("inventory_ui") # Player gates its input while this is open
 	_build_ui()
 	_hide_inventory()
-	
+
 	await get_tree().process_frame
 	await get_tree().process_frame
 	_find_player()
@@ -80,150 +73,100 @@ func _find_player() -> void:
 				inventory.held_item_changed.connect(_on_held_via_inventory)
 		print("[InventoryUI] Connected to player: %s" % player.name)
 
-func _on_held_via_inventory(item: ItemData) -> void:
+func _on_held_via_inventory(_item: ItemData) -> void:
 	_refresh_tray()
 	_refresh_sockets()
-	_sync_preview_hand(item)
 
 # ───────────────────────────────────────────────────
-#  UI Construction
+#  UI Construction (screen space)
 # ───────────────────────────────────────────────────
 
 func _build_ui() -> void:
 	_root = Control.new()
 	_root.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_root.mouse_filter = Control.MOUSE_FILTER_STOP
+	# IGNORE: clicks must fall through to the world-space socket hit-testing in _input
+	_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(_root)
 
-	# 1. Dark Vignette Background
-	_overlay = ColorRect.new()
-	_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_overlay.color = Color(0.04, 0.04, 0.06, 0.92)
-	_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_root.add_child(_overlay)
-
-	# 2. 3D Character Viewport (Full Screen Center Stage)
-	_build_3d_viewport()
-
-	# 3. Socket Overlay Layer (Screen-space 3D tracking)
-	_socket_container = Control.new()
-	_socket_container.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_socket_container.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_root.add_child(_socket_container)
-
-	_build_sockets()
-
-	# 4. Minimalist Bottom Item Tray (Matching Sketch)
 	_build_tray()
+
+	# Drag ghost — glowing circle that follows the cursor over BOTH surfaces
+	_ghost = DragGhost.new()
+	_ghost.size = Vector2(72, 72)
+	_ghost.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_ghost.visible = false
+	_root.add_child(_ghost)
 
 	_root.resized.connect(_layout)
 	call_deferred("_layout")
 
-func _build_3d_viewport() -> void:
-	_vp_container = SubViewportContainer.new()
-	_vp_container.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_vp_container.stretch = true
-	_vp_container.mouse_filter = Control.MOUSE_FILTER_STOP
-	_vp_container.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	_vp_container.gui_input.connect(_on_viewport_gui_input)
-	_root.add_child(_vp_container)
+func _build_tray() -> void:
+	# Minimalist: a single floating HAND slot at bottom-center — no panel, no text
+	_item_tray = HBoxContainer.new()
+	_item_tray.alignment = BoxContainer.ALIGNMENT_CENTER
+	_item_tray.add_theme_constant_override("separation", 14)
+	_item_tray.mouse_filter = Control.MOUSE_FILTER_PASS # children (slots) handle clicks
+	_root.add_child(_item_tray)
 
-	_sub_viewport = SubViewport.new()
-	_sub_viewport.own_world_3d = true
-	_sub_viewport.transparent_bg = true
-	_sub_viewport.handle_input_locally = false
-	_sub_viewport.msaa_3d = Viewport.MSAA_4X
-	_sub_viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
-	_sub_viewport.use_hdr_2d = false
-	_vp_container.add_child(_sub_viewport)
+func _layout() -> void:
+	var vp_size := get_viewport().get_visible_rect().size
+	if vp_size.x < 10 or vp_size.y < 10:
+		return
+	if _item_tray:
+		var tray_size := _item_tray.get_combined_minimum_size().max(Vector2(80, 88))
+		_item_tray.size = tray_size
+		_item_tray.position = Vector2((vp_size.x - tray_size.x) / 2.0, vp_size.y - tray_size.y - 26.0)
 
-	# Environment
-	var env_node := WorldEnvironment.new()
-	var env := Environment.new()
-	env.background_mode = Environment.BG_CLEAR_COLOR
-	env.tonemap_mode = Environment.TONE_MAPPER_ACES
-	env.glow_enabled = true
-	env.glow_bloom = 0.2
-	env.glow_intensity = 0.5
-	env_node.environment = env
-	_sub_viewport.add_child(env_node)
+## Tray area (grown for forgiving drops) used for 3D-ring -> 2D-tray unequip targeting
+func _tray_drop_rect() -> Rect2:
+	if _item_tray == null or not is_instance_valid(_item_tray) or _item_tray.get_child_count() == 0:
+		return Rect2(Vector2.ZERO, Vector2.ZERO)
+	return _item_tray.get_global_rect().grow(48.0)
 
-	# 3-Point Studio Lighting
-	var key_light := DirectionalLight3D.new()
-	key_light.rotation_degrees = Vector3(-25, 35, 0)
-	key_light.light_color = Color(1.0, 0.98, 0.94)
-	key_light.light_energy = 1.4
-	key_light.shadow_enabled = true
-	_sub_viewport.add_child(key_light)
+# ───────────────────────────────────────────────────
+#  World-Space Sockets on the Character Model
+# ───────────────────────────────────────────────────
 
-	var fill_light := DirectionalLight3D.new()
-	fill_light.rotation_degrees = Vector3(-15, -60, 0)
-	fill_light.light_color = Color(0.4, 0.65, 0.95)
-	fill_light.light_energy = 0.8
-	_sub_viewport.add_child(fill_light)
+func _ensure_sockets() -> void:
+	if _socket_root and is_instance_valid(_socket_root):
+		return
+	if player == null:
+		return
+	_skeleton = _search_skeleton(player)
+	if _skeleton == null:
+		push_warning("[InventoryUI] No Skeleton3D found on player — sockets disabled")
+		return
+	_socket_root = Node3D.new()
+	_socket_root.name = "InventorySockets"
+	_skeleton.add_child(_socket_root)
 
-	var rim_light := DirectionalLight3D.new()
-	rim_light.rotation_degrees = Vector3(20, 165, 0)
-	rim_light.light_color = Color(0.3, 0.9, 1.0)
-	rim_light.light_energy = 2.6
-	_sub_viewport.add_child(rim_light)
+	# 1: CAPE (upper back), 2: HELMET (head), 3: ARMOR (chest),
+	# 4: BOOTS (right foot), 5: ACCESSORY (left hand), 6: HAND (right hand, display-only)
+	_create_socket(1, "spine_03.x", Vector3(0.0, 0.48, -0.05), Vector3(0.0, 1.76, 0.0), 0.10)
+	_create_socket(2, "spine_03.x", Vector3(0.0, 0.30, 0.06), Vector3(0.0, 1.58, 0.05), 0.10)
+	_create_socket(3, "spine_02.x", Vector3(0.0, 0.05, 0.12), Vector3(0.0, 1.25, 0.12), 0.10)
+	_create_socket(5, "hand_l.x", Vector3(0.0, 0.0, 0.0), Vector3(0.38, 0.85, 0.02), 0.09)
+	_create_socket(4, "foot_r.x", Vector3(0.0, 0.0, 0.05), Vector3(0.18, 0.10, 0.08), 0.09)
+	_create_socket(6, "hand.r", Vector3(0.02, -0.02, 0.06), Vector3(0.42, 0.92, 0.08), 0.12)
 
-	# Stylized Floor Disc Pedestal
-	var pedestal := MeshInstance3D.new()
-	var cylinder := CylinderMesh.new()
-	cylinder.top_radius = 0.85
-	cylinder.bottom_radius = 0.90
-	cylinder.height = 0.03
-	pedestal.mesh = cylinder
-	pedestal.position = Vector3(0, -0.015, 0)
-	var ped_mat := StandardMaterial3D.new()
-	ped_mat.albedo_color = Color(0.08, 0.10, 0.15)
-	ped_mat.metallic = 0.9
-	ped_mat.roughness = 0.2
-	pedestal.material_override = ped_mat
-	_sub_viewport.add_child(pedestal)
-
-	# Glowing Pedestal Rim
-	var torus := TorusMesh.new()
-	torus.inner_radius = 0.84
-	torus.outer_radius = 0.87
-	var torus_inst := MeshInstance3D.new()
-	torus_inst.mesh = torus
-	torus_inst.position = Vector3(0, 0.005, 0)
-	var t_mat := StandardMaterial3D.new()
-	t_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	t_mat.albedo_color = Color(0.3, 0.85, 1.0)
-	torus_inst.material_override = t_mat
-	_sub_viewport.add_child(torus_inst)
-
-	# 3D Model Root (Rotated by player drag)
-	_preview_model_root = Node3D.new()
-	_preview_model_root.name = "CharacterPivot"
-	_sub_viewport.add_child(_preview_model_root)
-
-	_preview_c11 = C11ModelScene.instantiate()
-	_preview_model_root.add_child(_preview_c11)
-
-	# Discover Skeleton & AnimationPlayer
-	_preview_skeleton = _search_skeleton(_preview_c11)
-	_preview_ap = _search_animation_player(_preview_c11)
-	if _preview_ap and _preview_ap.has_animation("Idle"):
-		_preview_ap.get_animation("Idle").loop_mode = Animation.LOOP_LINEAR
-		_preview_ap.play("Idle")
-
-	# Equipment manager for 3D preview
-	_preview_equipment = EquipmentCls.new()
-	_preview_equipment.name = "PreviewEquipment"
-	_preview_model_root.add_child(_preview_equipment)
-
-	# Setup 3D Body Attachment Anchors
-	_setup_body_anchors()
-
-	# Camera3D — Framed so the entire 3D character fits comfortably with clearance
-	_preview_camera = Camera3D.new()
-	_preview_camera.position = Vector3(0, 0.85, 3.6)
-	_preview_camera.fov = 38.0
-	_sub_viewport.add_child(_preview_camera)
+func _create_socket(slot_id: int, preferred_bone: String, bone_offset: Vector3, fallback_pos: Vector3, world_radius: float) -> void:
+	var marker: Node3D = null
+	if _skeleton and _skeleton.find_bone(preferred_bone) != -1:
+		var ba := BoneAttachment3D.new()
+		ba.bone_name = preferred_bone
+		_skeleton.add_child(ba)
+		marker = Marker3D.new()
+		marker.position = bone_offset
+		ba.add_child(marker)
+	else:
+		marker = Marker3D.new()
+		marker.position = fallback_pos
+		_socket_root.add_child(marker)
+	var sock: EquipSocket3D = EquipSocket3DScript.new(slot_id, world_radius)
+	marker.add_child(sock)
+	sock.anchor = marker
+	_anchors[slot_id] = marker
+	_sockets[slot_id] = sock
 
 func _search_skeleton(n: Node) -> Skeleton3D:
 	if n is Skeleton3D:
@@ -234,160 +177,41 @@ func _search_skeleton(n: Node) -> Skeleton3D:
 			return r
 	return null
 
-func _search_animation_player(n: Node) -> AnimationPlayer:
-	if n is AnimationPlayer:
-		return n as AnimationPlayer
-	for c in n.get_children():
-		var r = _search_animation_player(c)
-		if r:
-			return r
-	return null
-
-func _setup_body_anchors() -> void:
-	# Create 3D anchor points attached to the character rig
-	# 1: CAPE (Upper Head / Crown)
-	_create_anchor(1, "spine_03.x", Vector3(0.0, 0.48, -0.05), Vector3(0.0, 1.76, 0.0))
-	# 2: HELMET (Head center)
-	_create_anchor(2, "spine_03.x", Vector3(0.0, 0.30, 0.06), Vector3(0.0, 1.58, 0.05))
-	# 3: ARMOR (Chest center / mass)
-	_create_anchor(3, "spine_02.x", Vector3(0.0, 0.05, 0.12), Vector3(0.0, 1.25, 0.12))
-	# 5: ACCESSORY (Left Hand / Wrist)
-	_create_anchor(5, "hand_l.x", Vector3(0.0, 0.0, 0.0), Vector3(0.38, 0.85, 0.02))
-	# 4: BOOTS (Right Foot / Ankle)
-	_create_anchor(4, "foot_r.x", Vector3(0.0, 0.0, 0.05), Vector3(0.18, 0.10, 0.08))
-	# 6: HAND (Right Hand — held item)
-	_create_anchor(6, "hand.r", Vector3(0.02, -0.02, 0.06), Vector3(0.42, 0.92, 0.08))
-
-func _create_anchor(slot_id: int, preferred_bone: String, bone_offset: Vector3, fallback_pos: Vector3) -> void:
-	if _preview_skeleton and _preview_skeleton.find_bone(preferred_bone) != -1:
-		var ba := BoneAttachment3D.new()
-		ba.bone_name = preferred_bone
-		_preview_skeleton.add_child(ba)
-		var marker := Marker3D.new()
-		marker.position = bone_offset
-		ba.add_child(marker)
-		_body_anchors[slot_id] = marker
-	else:
-		var marker := Marker3D.new()
-		marker.position = fallback_pos
-		_preview_model_root.add_child(marker)
-		_body_anchors[slot_id] = marker
-
-func _build_sockets() -> void:
-	# 5 Glowing Sockets + HAND (6) for held item
-	# 1: Cape, 2: Helmet, 3: Armor, 4: Boots, 5: Accessory, 6: HAND (right hand)
-	var slots := [1, 2, 3, 4, 5, 6]
-	for slot_id in slots:
-		var r := 28.0 if slot_id == 6 else 24.0 # HAND slightly bigger
-		var sock := EquipSocket.new(slot_id, r)
-		sock.socket_equipped.connect(_on_socket_equipped)
-		sock.socket_unequipped.connect(_on_socket_unequipped)
-		_sockets[slot_id] = sock
-		_socket_container.add_child(sock)
-
-var _hand_label: Label = null
-func _build_tray() -> void:
-	_tray_panel = PanelContainer.new()
-	var t_style := StyleBoxFlat.new()
-	t_style.bg_color = Color(0.06, 0.07, 0.10, 0.75)
-	t_style.border_color = Color(1, 1, 1, 0.25)
-	t_style.set_border_width_all(1)
-	t_style.corner_radius_top_left = 10
-	t_style.corner_radius_top_right = 10
-	t_style.corner_radius_bottom_left = 10
-	t_style.corner_radius_bottom_right = 10
-	t_style.set_content_margin_all(10)
-	_tray_panel.add_theme_stylebox_override("panel", t_style)
-	_root.add_child(_tray_panel)
-	# Vertical container for label + tray
-	var vbox := VBoxContainer.new()
-	vbox.alignment = BoxContainer.ALIGNMENT_CENTER
-	_tray_panel.add_child(vbox)
-	_hand_label = Label.new()
-	_hand_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_hand_label.add_theme_font_size_override("font_size", 11)
-	_hand_label.add_theme_color_override("font_color", Color(0.75,0.85,1.0,0.9))
-	_hand_label.text = "HAND — Empty (F to pick up nearby item)"
-	vbox.add_child(_hand_label)
-	_item_tray = HBoxContainer.new()
-	_item_tray.alignment = BoxContainer.ALIGNMENT_CENTER
-	_item_tray.add_theme_constant_override("separation", 14)
-	vbox.add_child(_item_tray)
-
-func _layout() -> void:
-	var vp_size := get_viewport().get_visible_rect().size
-	if vp_size.x < 10 or vp_size.y < 10:
-		return
-
-	# Position bottom item tray
-	if _tray_panel:
-		var tray_w := maxf(_tray_panel.get_combined_minimum_size().x, 340.0)
-		var tray_h := maxf(_tray_panel.get_combined_minimum_size().y, 114.0)
-		_tray_panel.position = Vector2((vp_size.x - tray_w) / 2.0, vp_size.y - tray_h - 28.0)
-		_tray_panel.size = Vector2(tray_w, tray_h)
-
 # ───────────────────────────────────────────────────
-#  Real-Time 3D Bone Tracking to Screen Space
+#  Per-Frame: project sockets to screen, drive drag feedback
 # ───────────────────────────────────────────────────
 
 func _process(delta: float) -> void:
 	if not _is_open:
 		return
 
-	# Handle 3D rotation momentum
-	if _preview_model_root and not _is_dragging_3d and abs(_rot_velocity) > 0.0001:
-		_preview_model_root.rotation.y += _rot_velocity * delta * 60.0
-		_rot_velocity = lerp(_rot_velocity, 0.0, delta * 6.0)
+	# Move the drag ghost with the cursor (works over 2D and 3D alike)
+	if _drag_active and _ghost:
+		_ghost.position = _root.get_viewport().get_mouse_position() - _ghost.size / 2.0
 
-	# Track 3D body parts to 2D socket positions
-	var mouse_pos := _root.get_viewport().get_mouse_position()
-	
-	if _preview_camera and _sub_viewport:
-		for slot_id in _sockets.keys():
-			var sock: EquipSocket = _sockets[slot_id]
-			if _body_anchors.has(slot_id):
-				var anchor: Node3D = _body_anchors[slot_id]
-				if anchor and is_instance_valid(anchor):
-					var world_pos := anchor.global_position
-					var is_behind := _preview_camera.is_position_behind(world_pos)
-					if not is_behind:
-						var vp_pos := _preview_camera.unproject_position(world_pos)
-						# Align center of socket to body position
-						sock.position = vp_pos - (sock.size / 2.0)
-						sock.visible = true
-					else:
-						# Dim or hide when facing completely behind
-						sock.visible = false
-			
-			# Update proximity glow
-			sock.update_proximity(mouse_pos, delta)
+	# Project every world-space ring to screen space & update its visuals
+	var cam := get_viewport().get_camera_3d()
+	var mouse := _root.get_viewport().get_mouse_position()
+	for slot_id in _sockets.keys():
+		var sock: EquipSocket3D = _sockets[slot_id]
+		var anchor: Node3D = _anchors.get(slot_id)
+		if sock == null or anchor == null or not is_instance_valid(anchor):
+			continue
+		if cam == null:
+			sock.visible_on_screen = false
+			continue
+		var world_pos: Vector3 = anchor.global_position
+		if cam.is_position_behind(world_pos):
+			sock.visible_on_screen = false
+		else:
+			sock.visible_on_screen = true
+			sock.screen_position = cam.unproject_position(world_pos)
+			var right: Vector3 = cam.global_transform.basis.x
+			sock.screen_radius = sock.screen_position.distance_to(cam.unproject_position(world_pos + right * sock.radius))
+		sock.update_state(delta, mouse, _drag_item, _drag_source_socket != null)
 
 # ───────────────────────────────────────────────────
-#  3D Character Drag-to-Rotate
-# ───────────────────────────────────────────────────
-
-func _on_viewport_gui_input(event: InputEvent) -> void:
-	if event is InputEventMouseButton:
-		var mb := event as InputEventMouseButton
-		if mb.button_index == MOUSE_BUTTON_LEFT:
-			_is_dragging_3d = mb.pressed
-			if mb.pressed:
-				_rot_velocity = 0.0
-		elif mb.button_index == MOUSE_BUTTON_WHEEL_UP and mb.pressed:
-			if _preview_camera:
-				_preview_camera.position.z = clampf(_preview_camera.position.z - 0.25, 2.2, 4.8)
-		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
-			if _preview_camera:
-				_preview_camera.position.z = clampf(_preview_camera.position.z + 0.25, 2.2, 4.8)
-	elif event is InputEventMouseMotion and _is_dragging_3d:
-		var mm := event as InputEventMouseMotion
-		if _preview_model_root:
-			var rot_delta: float = mm.relative.x * 0.012
-			_preview_model_root.rotation.y += rot_delta
-			_rot_velocity = mm.velocity.x * 0.0003
-
-# ───────────────────────────────────────────────────
-#  Open / Close & Input
+#  Input: TAB toggle + custom cross-surface drag
 # ───────────────────────────────────────────────────
 
 func _input(event: InputEvent) -> void:
@@ -395,6 +219,108 @@ func _input(event: InputEvent) -> void:
 		if event.keycode == KEY_TAB:
 			toggle()
 			get_viewport().set_input_as_handled()
+			return
+
+	if not _is_open:
+		return
+
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			_try_begin_socket_drag()
+		else:
+			if _drag_active:
+				_end_drag()
+				get_viewport().set_input_as_handled()
+
+func _try_begin_socket_drag() -> void:
+	var mp := _root.get_viewport().get_mouse_position()
+	# Presses over the tray belong to the tray slots (they start their own drags)
+	if _tray_drop_rect().has_point(mp):
+		return
+	if _drag_active:
+		return
+	var sock := _socket_at(mp)
+	if sock and sock.equipped_item != null and sock.slot != ItemData.EquipSlot.HAND:
+		_begin_drag(sock.equipped_item, sock, null)
+
+func _socket_at(mp: Vector2) -> EquipSocket3D:
+	var best: EquipSocket3D = null
+	var best_dist: float = INF
+	for slot_id in _sockets.keys():
+		var sock: EquipSocket3D = _sockets[slot_id]
+		if not sock.visible_on_screen:
+			continue
+		var d := mp.distance_to(sock.screen_position)
+		if d <= maxf(sock.screen_radius * 1.3, 26.0) and d < best_dist:
+			best_dist = d
+			best = sock
+	return best
+
+func _begin_drag(item: ItemData, source_socket: EquipSocket3D, source_slot: Control) -> void:
+	if item == null or _drag_active:
+		return
+	_drag_item = item
+	_drag_source_socket = source_socket
+	_drag_source_slot = source_slot
+	_drag_active = true
+	_drag_press_pos = _root.get_viewport().get_mouse_position()
+	if _ghost:
+		_ghost.color = item.preview_color
+		_ghost.visible = true
+	if source_slot:
+		source_slot.modulate = Color(1, 1, 1, 0.35)
+	print("[InventoryUI] Drag started: '%s' (from %s)" % [item.display_name, "socket" if source_socket else "tray"])
+
+func _end_drag() -> void:
+	if not _drag_active or _drag_item == null:
+		_cancel_drag()
+		return
+	var item := _drag_item
+	var source_socket := _drag_source_socket
+	var mp := _root.get_viewport().get_mouse_position()
+	var moved := mp.distance_to(_drag_press_pos)
+	var target_sock := _socket_at(mp)
+
+	if source_socket == null:
+		# ── 2D tray → 3D ring: equip ──
+		if target_sock and target_sock.slot == item.slot and target_sock.slot != ItemData.EquipSlot.HAND:
+			_on_socket_equipped(target_sock.slot, item)
+		# else: released nowhere valid → item stays in the tray
+	else:
+		# ── 3D ring → 2D tray: unequip into HAND ──
+		var over_tray := _tray_drop_rect().has_point(mp)
+		var clicked_same := moved < 8.0 and target_sock == source_socket
+		if over_tray or clicked_same:
+			if inventory and not inventory.can_pickup():
+				print("[InventoryUI] HAND full — drop it (G) before storing gear")
+			else:
+				_on_socket_unequipped(source_socket.slot, item)
+
+	# Restore tray slot visuals
+	if _drag_source_slot and is_instance_valid(_drag_source_slot):
+		_drag_source_slot.modulate = Color.WHITE
+	_drag_item = null
+	_drag_source_socket = null
+	_drag_source_slot = null
+	_drag_active = false
+	if _ghost:
+		_ghost.visible = false
+	_refresh_tray()
+	_refresh_sockets()
+
+func _cancel_drag() -> void:
+	if _drag_source_slot and is_instance_valid(_drag_source_slot):
+		_drag_source_slot.modulate = Color.WHITE
+	_drag_item = null
+	_drag_source_socket = null
+	_drag_source_slot = null
+	_drag_active = false
+	if _ghost:
+		_ghost.visible = false
+
+# ───────────────────────────────────────────────────
+#  Open / Close
+# ───────────────────────────────────────────────────
 
 func toggle() -> void:
 	if _is_open:
@@ -402,74 +328,109 @@ func toggle() -> void:
 	else:
 		open_inventory()
 
+## Player.gd polls this to gate WASD/jump/keys while the inventory owns the mouse.
+func is_inventory_open() -> bool:
+	return _is_open
+
 func open_inventory() -> void:
 	if player == null or inventory == null or equipment == null:
 		_find_player()
 	_is_open = true
 	_root.visible = true
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	get_tree().paused = true
-	
-	_sync_preview_equipment()
+	# Game keeps running (no pause) — only player input is gated via the group
+
+	# Smoothly swing the gameplay camera to face the character's front
+	var pivot: Node = player.get_node_or_null("SpringArmPivot") if player else null
+	if pivot and pivot.has_method("set_inventory_mode"):
+		pivot.set_inventory_mode(true)
+
+	_ensure_sockets()
+	_set_sockets_visible(true)
 	_refresh_sockets()
 	_refresh_tray()
 	_layout()
 
 func close_inventory() -> void:
 	_is_open = false
+	_cancel_drag()
+	_set_sockets_visible(false)
 	_root.visible = false
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-	get_tree().paused = false
+	var pivot: Node = player.get_node_or_null("SpringArmPivot") if player else null
+	if pivot and pivot.has_method("set_inventory_mode"):
+		pivot.set_inventory_mode(false)
+
+## Bone-attached sockets live under BoneAttachment3D nodes on the skeleton, NOT
+## under _socket_root — so visibility must be toggled per socket, not just on the root.
+func _set_sockets_visible(v: bool) -> void:
+	if _socket_root:
+		_socket_root.visible = v
+	for slot_id in _sockets.keys():
+		var sock: Node3D = _sockets[slot_id]
+		if sock:
+			sock.visible = v
 
 func _hide_inventory() -> void:
 	_root.visible = false
 	_is_open = false
 
 # ───────────────────────────────────────────────────
-#  Data Refresh & Equipment Sync
+#  Data Refresh
 # ───────────────────────────────────────────────────
 
-func _sync_preview_equipment() -> void:
-	if _preview_equipment == null or equipment == null:
-		return
-	_preview_equipment.unequip_all()
-	var equipped: Dictionary = equipment.list_equipped()
-	for slot_id in equipped.keys():
-		var w = equipped[slot_id]
-		if w and is_instance_valid(w):
-			if w is WearableItem and w.scene_file_path != "":
-				var scn = load(w.scene_file_path)
-				if scn:
-					var p_w = _preview_equipment.equip_wearable(scn, slot_id, w.bone_name)
-					if p_w and player and "cloak_color" in player and p_w.has_method("set_color"):
-						p_w.set_color(player.get("cloak_color"))
-
 func _refresh_sockets() -> void:
+	if _sockets.is_empty():
+		return
 	# Equipment sockets (1-5)
 	if equipment != null:
 		var equipped: Dictionary = equipment.list_equipped()
 		for slot_id in _sockets.keys():
 			if slot_id == 6:
-				continue # HAND handled below
-			var sock: EquipSocket = _sockets[slot_id]
-			if equipped.has(slot_id):
-				var wearable = equipped[slot_id]
-				var item_data := _find_item_data_for_wearable(wearable, slot_id)
-				sock.set_equipped(item_data)
+				continue # HAND socket mirrors the inventory below
+			var sock: EquipSocket3D = _sockets[slot_id]
+			if equipped.has(slot_id) and equipped[slot_id] != null:
+				sock.set_equipped(_find_item_data_for_wearable(equipped[slot_id], slot_id))
 			else:
 				sock.clear_equipped()
-	# HAND socket (6) shows inventory held item
+	# HAND socket (6) displays the inventory's held item
 	if _sockets.has(6):
-		var hand_sock: EquipSocket = _sockets[6]
-		if inventory and inventory.has_method("get_held_item"):
-			var held = inventory.get_held_item()
-			if held:
-				hand_sock.set_equipped(held)
-			else:
-				hand_sock.clear_equipped()
+		var held = inventory.get_held_item() if inventory and inventory.has_method("get_held_item") else null
+		if held:
+			_sockets[6].set_equipped(held)
 		else:
-			hand_sock.clear_equipped()
-	_sync_preview_hand(inventory.get_held_item() if inventory and inventory.has_method("get_held_item") else null)
+			_sockets[6].clear_equipped()
+
+func _refresh_tray() -> void:
+	for child in _item_tray.get_children():
+		child.queue_free()
+	if inventory == null:
+		return
+	var items: Array = inventory.get_items()
+	for item in items:
+		if item is ItemData:
+			var slot_ctrl := InventorySlot.new()
+			slot_ctrl.drag_started.connect(_on_tray_drag_started.bind(slot_ctrl))
+			slot_ctrl.item_right_clicked.connect(_on_slot_item_dropped)
+			_item_tray.add_child(slot_ctrl)
+			slot_ctrl.setup(item, Vector2(96, 104))
+	# Empty placeholder slot visual when empty (single HAND slot)
+	if items.is_empty():
+		var empty := InventorySlot.new()
+		var placeholder := ItemData.new()
+		placeholder.display_name = "EMPTY"
+		placeholder.preview_color = Color(1, 1, 1, 0.12)
+		empty.setup(placeholder, Vector2(96, 104))
+		empty.modulate = Color(1, 1, 1, 0.5)
+		empty.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_item_tray.add_child(empty)
+	call_deferred("_layout")
+
+func _on_tray_drag_started(item: ItemData, slot_ctrl: Control) -> void:
+	if _drag_active:
+		slot_ctrl.modulate = Color.WHITE
+		return
+	_begin_drag(item, null, slot_ctrl)
 
 func _find_item_data_for_wearable(wearable: Node, slot_id: int) -> ItemData:
 	if wearable and "item_id" in wearable:
@@ -494,122 +455,9 @@ func _find_item_data_for_wearable(wearable: Node, slot_id: int) -> ItemData:
 	data.preview_color = Color(0.5, 0.5, 0.5)
 	return data
 
-func _refresh_tray() -> void:
-	for child in _item_tray.get_children():
-		child.queue_free()
-	if inventory == null:
-		if _hand_label:
-			_hand_label.text = "HAND — No inventory found"
-		return
-	var items: Array = inventory.get_items()
-	# HAND label
-	if _hand_label:
-		if items.is_empty():
-			_hand_label.text = "HAND — Empty  |  F to pick up  |  Tab to close"
-		else:
-			var it: ItemData = items[0] as ItemData
-			var usable_hint: String = "LMB/F to USE  |  G to DROP  |  Walk/Sprint only" if it.is_usable else "G to DROP  |  Walk/Sprint only (non-usable)"
-			_hand_label.text = "HAND: %s  —  %s" % [it.display_name.to_upper(), usable_hint]
-			_hand_label.add_theme_color_override("font_color", it.preview_color.lerp(Color.WHITE, 0.3))
-	for item in items:
-		if item is ItemData:
-			var slot_ctrl := InventorySlot.new()
-			slot_ctrl.drag_started.connect(_on_drag_started)
-			slot_ctrl.drag_ended.connect(_on_drag_ended)
-			slot_ctrl.item_right_clicked.connect(_on_slot_item_dropped)
-			_item_tray.add_child(slot_ctrl)
-			slot_ctrl.setup(item, Vector2(96, 104))
-	# Empty placeholder slot visual when empty (single HAND slot)
-	if items.is_empty():
-		var empty := InventorySlot.new()
-		# create placeholder ItemData for visual
-		var placeholder := ItemData.new()
-		placeholder.display_name = "EMPTY"
-		placeholder.preview_color = Color(1,1,1,0.12)
-		empty.setup(placeholder, Vector2(96,104))
-		empty.modulate = Color(1,1,1,0.5)
-		empty.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		_item_tray.add_child(empty)
-	call_deferred("_layout")
-
-func _sync_preview_hand(item: ItemData) -> void:
-	if _preview_skeleton == null:
-		return
-	# Remove old preview hand items (both BoneAttachment variant and root variant)
-	var prev_root = _preview_model_root.get_node_or_null("PreviewHandItem") as Node3D
-	if prev_root:
-		prev_root.queue_free()
-	# Also search for BoneAttachment preview under skeleton
-	for c in _preview_skeleton.get_children():
-		if c is BoneAttachment3D and c.name == "PreviewHandItem":
-			c.queue_free()
-			break
-	# Also search fallback: any PreviewHandItemInner under BA
-	for c in _preview_skeleton.get_children():
-		if c is BoneAttachment3D:
-			var inner = c.get_node_or_null("PreviewHandItemInner") as Node3D
-			if inner:
-				c.queue_free()
-				break
-	if item == null:
-		return
-	# Create preview mesh attached to right hand bone if possible, else as child
-	var preview_vis: Node3D = null
-	if item.mesh:
-		var mi := MeshInstance3D.new()
-		mi.mesh = item.mesh
-		if item.material:
-			mi.material_override = item.material
-		preview_vis = mi
-	elif item.scene:
-		var inst = item.scene.instantiate()
-		if inst is BoneAttachment3D:
-			var found := _search_mesh(inst)
-			if found:
-				var mi2 := MeshInstance3D.new()
-				mi2.mesh = found.mesh
-				mi2.material_override = found.material_override
-				preview_vis = mi2
-			inst.queue_free()
-		elif inst is Node3D:
-			preview_vis = inst as Node3D
-	if preview_vis == null:
-		var mi3 := MeshInstance3D.new()
-		var box := BoxMesh.new()
-		box.size = Vector3(0.22,0.22,0.22)
-		mi3.mesh = box
-		var mat := StandardMaterial3D.new()
-		mat.albedo_color = item.preview_color
-		mi3.material_override = mat
-		preview_vis = mi3
-	if preview_vis:
-		# Try bone attachment to preview skeleton right hand
-		var bone_idx := _preview_skeleton.find_bone("hand.r")
-		if bone_idx == -1:
-			bone_idx = _preview_skeleton.find_bone("hand_r")
-		if bone_idx != -1:
-			var ba := BoneAttachment3D.new()
-			ba.name = "PreviewHandItem"
-			ba.bone_name = _preview_skeleton.get_bone_name(bone_idx)
-			_preview_skeleton.add_child(ba)
-			ba.add_child(preview_vis)
-			preview_vis.name = "PreviewHandItemInner"
-			preview_vis.position = item.hold_offset
-			preview_vis.rotation_degrees = item.hold_rotation_deg
-			preview_vis.scale = item.hold_scale
-		else:
-			preview_vis.name = "PreviewHandItem"
-			_preview_model_root.add_child(preview_vis)
-			preview_vis.position = Vector3(0.4, 0.85, 0.1) + item.hold_offset
-
-func _search_mesh(n: Node) -> MeshInstance3D:
-	if n is MeshInstance3D:
-		return n as MeshInstance3D
-	for c in n.get_children():
-		var r := _search_mesh(c)
-		if r:
-			return r
-	return null
+# ───────────────────────────────────────────────────
+#  Drop Item Into The World (right-click in tray)
+# ───────────────────────────────────────────────────
 
 func _on_slot_item_dropped(item: ItemData) -> void:
 	if inventory == null or item == null:
@@ -622,6 +470,7 @@ func _on_slot_item_dropped(item: ItemData) -> void:
 				player.call("drop_held_item")
 				print("[InventoryUI] Dropped '%s' via HAND drop" % item.display_name)
 				_refresh_tray()
+				_refresh_sockets()
 				return
 	# 1. Remove from inventory
 	inventory.remove_item(item)
@@ -629,6 +478,7 @@ func _on_slot_item_dropped(item: ItemData) -> void:
 	_spawn_item_pickup_in_world(item)
 	print("[InventoryUI] Dropped '%s' into the world" % item.display_name)
 	_refresh_tray()
+	_refresh_sockets()
 
 func _spawn_item_pickup_in_world(item: ItemData) -> void:
 	if player == null or item == null:
@@ -688,20 +538,6 @@ func _spawn_item_pickup_in_world(item: ItemData) -> void:
 			inst.global_position = spawn_pos
 			print("[InventoryUI] Spawned pickup in world at: ", spawn_pos)
 
-func _on_drag_started(item: ItemData) -> void:
-	for slot_id in _sockets.keys():
-		var sock: EquipSocket = _sockets[slot_id]
-		sock.is_drag_active_globally = true
-		sock.is_valid_drag_target = (item.slot == sock.slot)
-		sock.queue_redraw()
-
-func _on_drag_ended() -> void:
-	for slot_id in _sockets.keys():
-		var sock: EquipSocket = _sockets[slot_id]
-		sock.is_drag_active_globally = false
-		sock.is_valid_drag_target = false
-		sock.queue_redraw()
-
 # ───────────────────────────────────────────────────
 #  Equip / Unequip Logic
 # ───────────────────────────────────────────────────
@@ -709,6 +545,8 @@ func _on_drag_ended() -> void:
 func _on_socket_equipped(slot: int, item: ItemData) -> void:
 	if equipment == null or inventory == null:
 		return
+	if slot == ItemData.EquipSlot.HAND:
+		return # HAND ring is display-only; the item is already in the tray
 
 	var old_wearable = equipment.get_equipped(slot)
 	if old_wearable and is_instance_valid(old_wearable):
@@ -731,13 +569,14 @@ func _on_socket_equipped(slot: int, item: ItemData) -> void:
 			inventory.add_item(item)
 			push_warning("[InventoryUI] Failed to equip '%s'" % item.display_name)
 
-	_sync_preview_equipment()
 	_refresh_sockets()
 	_refresh_tray()
 
 func _on_socket_unequipped(slot: int, item: ItemData) -> void:
 	if equipment == null or inventory == null:
 		return
+	if slot == ItemData.EquipSlot.HAND:
+		return # held item lives in the tray already
 
 	equipment.unequip_slot(slot)
 	if slot == ItemData.EquipSlot.CAPE and player and "cloak" in player:
@@ -746,6 +585,28 @@ func _on_socket_unequipped(slot: int, item: ItemData) -> void:
 	inventory.add_item(item)
 	print("[InventoryUI] Unequipped '%s' from slot %d" % [item.display_name, slot])
 
-	_sync_preview_equipment()
 	_refresh_sockets()
 	_refresh_tray()
+
+# ───────────────────────────────────────────────────
+#  Drag Ghost (screen-space circle following the cursor)
+# ───────────────────────────────────────────────────
+
+class DragGhost:
+	extends Control
+	var color: Color = Color.WHITE
+	var _t: float = 0.0
+
+	func _process(delta: float) -> void:
+		if visible:
+			_t += delta * 6.0
+			queue_redraw()
+
+	func _draw() -> void:
+		var c := size / 2.0
+		var r := 24.0 + sin(_t) * 1.5
+		draw_circle(c, r + 7.0, Color(color.r, color.g, color.b, 0.22))
+		draw_circle(c, r + 3.0, Color(color.r, color.g, color.b, 0.45))
+		draw_circle(c, r, color)
+		draw_arc(c, r, 0, TAU, 40, Color.WHITE, 2.0)
+		draw_circle(c + Vector2(-r * 0.3, -r * 0.3), r * 0.25, Color(1, 1, 1, 0.6))
