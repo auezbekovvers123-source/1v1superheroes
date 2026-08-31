@@ -75,7 +75,5 @@ dash={
 [physics]
 
 3d/physics_engine="Jolt Physics"
-; Stiffer ragdoll joints: default position_steps=2 lets joints stretch visibly
-; while a body hangs from the hand grab. More iterations = less stretch.
 jolt_physics_3d/solver/position_steps=8
 jolt_physics_3d/solver/velocity_steps=16

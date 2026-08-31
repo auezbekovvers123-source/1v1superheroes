@@ -127,7 +127,7 @@ y_label = "forward"
 [sub_resource type="AnimationNodeOneShot" id="AnimationNodeOneShot_upper_oneshot"]
 resource_local_to_scene = true
 filter_enabled = true
-filters = ["root/Skeleton3D:c_traj", "root/Skeleton3D:root.x", "root/Skeleton3D:spine_02.x", "root/Skeleton3D:spine_03.x", "root/Skeleton3D:neck.x", "root/Skeleton3D:head.x", "root/Skeleton3D:shoulder.r", "root/Skeleton3D:arm_stretch.r", "root/Skeleton3D:forearm_stretch.r", "root/Skeleton3D:hand.r", "root/Skeleton3D:index1_base.r", "root/Skeleton3D:index1.r", "root/Skeleton3D:index2.r", "root/Skeleton3D:index3.r", "root/Skeleton3D:shoulder.l", "root/Skeleton3D:arm_stretch.l", "root/Skeleton3D:forearm_stretch.l", "root/Skeleton3D:hand.l", "root/Skeleton3D:index1_base.l", "root/Skeleton3D:index1.l", "root/Skeleton3D:index2.l", "root/Skeleton3D:index3.l"]
+filters = ["root/Skeleton3D:spine_02.x", "root/Skeleton3D:spine_03.x", "root/Skeleton3D:neck.x", "root/Skeleton3D:head.x", "root/Skeleton3D:shoulder.r", "root/Skeleton3D:arm_stretch.r", "root/Skeleton3D:forearm_stretch.r", "root/Skeleton3D:hand.r", "root/Skeleton3D:index1_base.r", "root/Skeleton3D:index1.r", "root/Skeleton3D:index2.r", "root/Skeleton3D:index3.r", "root/Skeleton3D:shoulder.l", "root/Skeleton3D:arm_stretch.l", "root/Skeleton3D:forearm_stretch.l", "root/Skeleton3D:hand.l", "root/Skeleton3D:index1_base.l", "root/Skeleton3D:index1.l", "root/Skeleton3D:index2.l", "root/Skeleton3D:index3.l"]
 fadein_time = 0.08
 fadeout_time = 0.14
 mix_mode = 0
