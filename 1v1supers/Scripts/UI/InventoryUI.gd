@@ -73,8 +73,17 @@ func _find_player() -> void:
 		inventory = player.get_node_or_null("Inventory")
 		equipment = player.get_node_or_null("Equipment")
 		if inventory and inventory.has_signal("inventory_changed"):
-			inventory.inventory_changed.connect(_refresh_tray)
+			if not inventory.inventory_changed.is_connected(_refresh_tray):
+				inventory.inventory_changed.connect(_refresh_tray)
+		if inventory and inventory.has_signal("held_item_changed"):
+			if not inventory.held_item_changed.is_connected(_on_held_via_inventory):
+				inventory.held_item_changed.connect(_on_held_via_inventory)
 		print("[InventoryUI] Connected to player: %s" % player.name)
+
+func _on_held_via_inventory(item: ItemData) -> void:
+	_refresh_tray()
+	_refresh_sockets()
+	_sync_preview_hand(item)
 
 # ───────────────────────────────────────────────────
 #  UI Construction
@@ -246,6 +255,8 @@ func _setup_body_anchors() -> void:
 	_create_anchor(5, "hand_l.x", Vector3(0.0, 0.0, 0.0), Vector3(0.38, 0.85, 0.02))
 	# 4: BOOTS (Right Foot / Ankle)
 	_create_anchor(4, "foot_r.x", Vector3(0.0, 0.0, 0.05), Vector3(0.18, 0.10, 0.08))
+	# 6: HAND (Right Hand — held item)
+	_create_anchor(6, "hand.r", Vector3(0.02, -0.02, 0.06), Vector3(0.42, 0.92, 0.08))
 
 func _create_anchor(slot_id: int, preferred_bone: String, bone_offset: Vector3, fallback_pos: Vector3) -> void:
 	if _preview_skeleton and _preview_skeleton.find_bone(preferred_bone) != -1:
@@ -263,16 +274,18 @@ func _create_anchor(slot_id: int, preferred_bone: String, bone_offset: Vector3, 
 		_body_anchors[slot_id] = marker
 
 func _build_sockets() -> void:
-	# 5 Glowing Sockets from the sketch (NO text)
-	# 1: Cape, 2: Helmet, 3: Armor, 4: Boots, 5: Accessory
-	var slots := [1, 2, 3, 4, 5]
+	# 5 Glowing Sockets + HAND (6) for held item
+	# 1: Cape, 2: Helmet, 3: Armor, 4: Boots, 5: Accessory, 6: HAND (right hand)
+	var slots := [1, 2, 3, 4, 5, 6]
 	for slot_id in slots:
-		var sock := EquipSocket.new(slot_id, 24.0)
+		var r := 28.0 if slot_id == 6 else 24.0 # HAND slightly bigger
+		var sock := EquipSocket.new(slot_id, r)
 		sock.socket_equipped.connect(_on_socket_equipped)
 		sock.socket_unequipped.connect(_on_socket_unequipped)
 		_sockets[slot_id] = sock
 		_socket_container.add_child(sock)
 
+var _hand_label: Label = null
 func _build_tray() -> void:
 	_tray_panel = PanelContainer.new()
 	var t_style := StyleBoxFlat.new()
@@ -286,11 +299,20 @@ func _build_tray() -> void:
 	t_style.set_content_margin_all(10)
 	_tray_panel.add_theme_stylebox_override("panel", t_style)
 	_root.add_child(_tray_panel)
-
+	# Vertical container for label + tray
+	var vbox := VBoxContainer.new()
+	vbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	_tray_panel.add_child(vbox)
+	_hand_label = Label.new()
+	_hand_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_hand_label.add_theme_font_size_override("font_size", 11)
+	_hand_label.add_theme_color_override("font_color", Color(0.75,0.85,1.0,0.9))
+	_hand_label.text = "HAND — Empty (F to pick up nearby item)"
+	vbox.add_child(_hand_label)
 	_item_tray = HBoxContainer.new()
 	_item_tray.alignment = BoxContainer.ALIGNMENT_CENTER
 	_item_tray.add_theme_constant_override("separation", 14)
-	_tray_panel.add_child(_item_tray)
+	vbox.add_child(_item_tray)
 
 func _layout() -> void:
 	var vp_size := get_viewport().get_visible_rect().size
@@ -423,17 +445,31 @@ func _sync_preview_equipment() -> void:
 						p_w.set_color(player.get("cloak_color"))
 
 func _refresh_sockets() -> void:
-	if equipment == null:
-		return
-	var equipped: Dictionary = equipment.list_equipped()
-	for slot_id in _sockets.keys():
-		var sock: EquipSocket = _sockets[slot_id]
-		if equipped.has(slot_id):
-			var wearable = equipped[slot_id]
-			var item_data := _find_item_data_for_wearable(wearable, slot_id)
-			sock.set_equipped(item_data)
+	# Equipment sockets (1-5)
+	if equipment != null:
+		var equipped: Dictionary = equipment.list_equipped()
+		for slot_id in _sockets.keys():
+			if slot_id == 6:
+				continue # HAND handled below
+			var sock: EquipSocket = _sockets[slot_id]
+			if equipped.has(slot_id):
+				var wearable = equipped[slot_id]
+				var item_data := _find_item_data_for_wearable(wearable, slot_id)
+				sock.set_equipped(item_data)
+			else:
+				sock.clear_equipped()
+	# HAND socket (6) shows inventory held item
+	if _sockets.has(6):
+		var hand_sock: EquipSocket = _sockets[6]
+		if inventory and inventory.has_method("get_held_item"):
+			var held = inventory.get_held_item()
+			if held:
+				hand_sock.set_equipped(held)
+			else:
+				hand_sock.clear_equipped()
 		else:
-			sock.clear_equipped()
+			hand_sock.clear_equipped()
+	_sync_preview_hand(inventory.get_held_item() if inventory and inventory.has_method("get_held_item") else null)
 
 func _find_item_data_for_wearable(wearable: Node, slot_id: int) -> ItemData:
 	if wearable and "item_id" in wearable:
@@ -462,8 +498,19 @@ func _refresh_tray() -> void:
 	for child in _item_tray.get_children():
 		child.queue_free()
 	if inventory == null:
+		if _hand_label:
+			_hand_label.text = "HAND — No inventory found"
 		return
 	var items: Array = inventory.get_items()
+	# HAND label
+	if _hand_label:
+		if items.is_empty():
+			_hand_label.text = "HAND — Empty  |  F to pick up  |  Tab to close"
+		else:
+			var it: ItemData = items[0] as ItemData
+			var usable_hint: String = "LMB/F to USE  |  G to DROP  |  Walk/Sprint only" if it.is_usable else "G to DROP  |  Walk/Sprint only (non-usable)"
+			_hand_label.text = "HAND: %s  —  %s" % [it.display_name.to_upper(), usable_hint]
+			_hand_label.add_theme_color_override("font_color", it.preview_color.lerp(Color.WHITE, 0.3))
 	for item in items:
 		if item is ItemData:
 			var slot_ctrl := InventorySlot.new()
@@ -471,26 +518,127 @@ func _refresh_tray() -> void:
 			slot_ctrl.drag_ended.connect(_on_drag_ended)
 			slot_ctrl.item_right_clicked.connect(_on_slot_item_dropped)
 			_item_tray.add_child(slot_ctrl)
-			slot_ctrl.setup(item)
+			slot_ctrl.setup(item, Vector2(96, 104))
+	# Empty placeholder slot visual when empty (single HAND slot)
+	if items.is_empty():
+		var empty := InventorySlot.new()
+		# create placeholder ItemData for visual
+		var placeholder := ItemData.new()
+		placeholder.display_name = "EMPTY"
+		placeholder.preview_color = Color(1,1,1,0.12)
+		empty.setup(placeholder, Vector2(96,104))
+		empty.modulate = Color(1,1,1,0.5)
+		empty.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_item_tray.add_child(empty)
 	call_deferred("_layout")
+
+func _sync_preview_hand(item: ItemData) -> void:
+	if _preview_skeleton == null:
+		return
+	# Remove old preview hand items (both BoneAttachment variant and root variant)
+	var prev_root = _preview_model_root.get_node_or_null("PreviewHandItem") as Node3D
+	if prev_root:
+		prev_root.queue_free()
+	# Also search for BoneAttachment preview under skeleton
+	for c in _preview_skeleton.get_children():
+		if c is BoneAttachment3D and c.name == "PreviewHandItem":
+			c.queue_free()
+			break
+	# Also search fallback: any PreviewHandItemInner under BA
+	for c in _preview_skeleton.get_children():
+		if c is BoneAttachment3D:
+			var inner = c.get_node_or_null("PreviewHandItemInner") as Node3D
+			if inner:
+				c.queue_free()
+				break
+	if item == null:
+		return
+	# Create preview mesh attached to right hand bone if possible, else as child
+	var preview_vis: Node3D = null
+	if item.mesh:
+		var mi := MeshInstance3D.new()
+		mi.mesh = item.mesh
+		if item.material:
+			mi.material_override = item.material
+		preview_vis = mi
+	elif item.scene:
+		var inst = item.scene.instantiate()
+		if inst is BoneAttachment3D:
+			var found := _search_mesh(inst)
+			if found:
+				var mi2 := MeshInstance3D.new()
+				mi2.mesh = found.mesh
+				mi2.material_override = found.material_override
+				preview_vis = mi2
+			inst.queue_free()
+		elif inst is Node3D:
+			preview_vis = inst as Node3D
+	if preview_vis == null:
+		var mi3 := MeshInstance3D.new()
+		var box := BoxMesh.new()
+		box.size = Vector3(0.22,0.22,0.22)
+		mi3.mesh = box
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = item.preview_color
+		mi3.material_override = mat
+		preview_vis = mi3
+	if preview_vis:
+		# Try bone attachment to preview skeleton right hand
+		var bone_idx := _preview_skeleton.find_bone("hand.r")
+		if bone_idx == -1:
+			bone_idx = _preview_skeleton.find_bone("hand_r")
+		if bone_idx != -1:
+			var ba := BoneAttachment3D.new()
+			ba.name = "PreviewHandItem"
+			ba.bone_name = _preview_skeleton.get_bone_name(bone_idx)
+			_preview_skeleton.add_child(ba)
+			ba.add_child(preview_vis)
+			preview_vis.name = "PreviewHandItemInner"
+			preview_vis.position = item.hold_offset
+			preview_vis.rotation_degrees = item.hold_rotation_deg
+			preview_vis.scale = item.hold_scale
+		else:
+			preview_vis.name = "PreviewHandItem"
+			_preview_model_root.add_child(preview_vis)
+			preview_vis.position = Vector3(0.4, 0.85, 0.1) + item.hold_offset
+
+func _search_mesh(n: Node) -> MeshInstance3D:
+	if n is MeshInstance3D:
+		return n as MeshInstance3D
+	for c in n.get_children():
+		var r := _search_mesh(c)
+		if r:
+			return r
+	return null
 
 func _on_slot_item_dropped(item: ItemData) -> void:
 	if inventory == null or item == null:
 		return
-	
+	# If player currently holds this exact item, delegate to player's drop (handles hand attachment & spawn)
+	if player and player.has_method("is_holding_item") and player.has_method("drop_held_item"):
+		if player.call("is_holding_item"):
+			var held = player.get("held_item") as ItemData
+			if held == item:
+				player.call("drop_held_item")
+				print("[InventoryUI] Dropped '%s' via HAND drop" % item.display_name)
+				_refresh_tray()
+				return
 	# 1. Remove from inventory
 	inventory.remove_item(item)
-	
 	# 2. Spawn item back in the world
 	_spawn_item_pickup_in_world(item)
-	
 	print("[InventoryUI] Dropped '%s' into the world" % item.display_name)
 	_refresh_tray()
 
 func _spawn_item_pickup_in_world(item: ItemData) -> void:
 	if player == null or item == null:
 		return
-
+	# Prefer player's hand drop logic if holding
+	if player and player.has_method("is_holding_item") and player.call("is_holding_item"):
+		var held = player.get("held_item")
+		if held == item and player.has_method("drop_held_item"):
+			player.call("drop_held_item")
+			return
 	# Calculate world spawn position (in front of player)
 	var spawn_pos: Vector3 = player.global_position
 	var forward: Vector3 = Vector3.FORWARD
@@ -499,17 +647,23 @@ func _spawn_item_pickup_in_world(item: ItemData) -> void:
 		forward = m.global_transform.basis.z.normalized()
 	elif player.has_node("SpringArmPivot"):
 		forward = Vector3.FORWARD.rotated(Vector3.UP, player.get_node("SpringArmPivot").rotation.y)
-	
 	forward.y = 0.0
 	if forward.length() > 0.1:
 		spawn_pos += forward.normalized() * 1.6
 	spawn_pos.y += 0.5
-
 	# Load pickup scene
 	var pickup_scene: PackedScene = null
 	if item.id == "cloak_01":
 		pickup_scene = load("res://Scenes/Items/CloakPickup.tscn")
-	
+	elif item.id == "usable_01":
+		pickup_scene = load("res://Scenes/Items/UsablePickup.tscn")
+	elif item.id == "holdable_01":
+		pickup_scene = load("res://Scenes/Items/RockPickup.tscn")
+	elif item.slot == ItemData.EquipSlot.HAND:
+		if item.is_usable:
+			pickup_scene = load("res://Scenes/Items/UsablePickup.tscn")
+		else:
+			pickup_scene = load("res://Scenes/Items/RockPickup.tscn")
 	var inst: Node3D = null
 	if pickup_scene:
 		inst = pickup_scene.instantiate() as Node3D
@@ -518,7 +672,6 @@ func _spawn_item_pickup_in_world(item: ItemData) -> void:
 		var area = Area3D.new()
 		area.set_script(pickup_script)
 		inst = area
-	
 	if inst:
 		inst.set("item_data", item)
 		inst.set("item_name", item.display_name)
@@ -529,7 +682,6 @@ func _spawn_item_pickup_in_world(item: ItemData) -> void:
 		inst.set("auto_pickup", false)
 		inst.set("require_interact", true)
 		inst.set("pickup_radius", 2.0)
-		
 		var level = get_tree().current_scene
 		if level:
 			level.add_child(inst)

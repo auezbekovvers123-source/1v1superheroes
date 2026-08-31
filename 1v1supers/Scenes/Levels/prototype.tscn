@@ -1,6 +1,8 @@
 [gd_scene load_steps=20 format=3 uid="uid://coue2qehpn4fr"]
 
 [ext_resource type="PackedScene" uid="uid://c9p8k3l2m4n5o" path="res://Scenes/Items/CloakPickup.tscn" id="10_pickup"]
+[ext_resource type="PackedScene" path="res://Scenes/Items/UsablePickup.tscn" id="10_usable"]
+[ext_resource type="PackedScene" path="res://Scenes/Items/RockPickup.tscn" id="10_rock"]
 [ext_resource type="Script" path="res://Scripts/UI/InventoryUI.gd" id="11_inv_ui"]
 [ext_resource type="Texture2D" uid="uid://b8q44ipg8a3cq" path="res://Assets/Textures/Black.png" id="1_hwes2"]
 [ext_resource type="Texture2D" uid="uid://doyodkg1ds7td" path="res://Assets/Textures/Sky.png" id="1_rrvcb"]
@@ -117,6 +119,12 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4.2, 0.5, 0.8)
 
 [node name="CloakPickup2" parent="." instance=ExtResource("10_pickup")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4.0, 0.5, -2.0)
+
+[node name="UsablePickup" parent="." instance=ExtResource("10_usable")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.0, 0.5, -2.2)
+
+[node name="RockPickup" parent="." instance=ExtResource("10_rock")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.0, 0.5, 0.5)
 
 [node name="CombatHUD" type="CanvasLayer" parent="."]
 script = ExtResource("9_hud")

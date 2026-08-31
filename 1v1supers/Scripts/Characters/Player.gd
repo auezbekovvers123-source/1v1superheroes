@@ -86,6 +86,18 @@ var is_aiming: bool = false
 var aim_point: Vector3 = Vector3.ZERO
 var aim_direction: Vector3 = Vector3.FORWARD
 
+# --- Hand Hold (single HAND slot) ---
+const HOLD_ANIM: String = "UpperBody_ITEMHOLD"
+const USE_ANIM: String = "UpperBody_ITEMUSE"
+var held_item: ItemData = null
+var held_instance: Node3D = null
+var hand_attachment: BoneAttachment3D = null
+var _is_holding: bool = false
+var _is_using_item: bool = false
+var _use_timer: float = 0.0
+var _hold_attach_tween: Tween = null
+var _hand_bone_name: String = "hand.r"
+
 # --- Dash (Ctrl) ---
 var is_dashing: bool = false
 var dash_timer: float = 0.0
@@ -184,6 +196,7 @@ func _ready() -> void:
 	_setup_ragdoll()
 	_setup_grabber()
 	_setup_wearables()
+	_setup_hand_hold()
 
 func _setup_combat_nodes() -> void:
 	# --- Health ---
@@ -308,9 +321,43 @@ func _setup_wearables() -> void:
 		inventory = InventoryCls.new()
 		inventory.name = "Inventory"
 		add_child(inventory)
+	# Connect inventory HAND signals
+	if inventory and inventory.has_signal("held_item_changed"):
+		if not inventory.held_item_changed.is_connected(_on_held_item_changed):
+			inventory.held_item_changed.connect(_on_held_item_changed)
+	# If inventory already has held item (scene reload), sync
+	if inventory and inventory.has_method("get_held_item"):
+		var existing_held = inventory.get_held_item()
+		if existing_held:
+			call_deferred("attach_held_item", existing_held)
 	# Defer cloak equip one frame to ensure skeleton is ready
 	if auto_equip_cloak:
 		call_deferred("_equip_cloak_deferred")
+
+func _setup_hand_hold() -> void:
+	# Ensure hand attachment exists; will be created lazily on first attach
+	if inventory and inventory.has_signal("held_item_changed"):
+		if not inventory.held_item_changed.is_connected(_on_held_item_changed):
+			inventory.held_item_changed.connect(_on_held_item_changed)
+
+func _on_held_item_changed(item: ItemData) -> void:
+	# Sync from Inventory signal — if null we already detached via drop, else attach
+	if item == null:
+		if _is_holding and held_item != null:
+			# Inventory cleared externally — ensure visual detached (unless dropping already handled)
+			if held_instance and is_instance_valid(held_instance):
+				_detach_held_visual()
+			_exit_hold_state()
+			held_item = null
+			_is_holding = false
+	else:
+		if not _is_holding or held_item != item:
+			attach_held_item(item)
+
+func _on_hand_full_feedback() -> void:
+	print("[Hand] Cannot pick up — HAND already holds '%s'. Drop with G first." % (held_item.display_name if held_item else "?"))
+	if spring_arm_pivot and spring_arm_pivot.has_method("add_trauma"):
+		spring_arm_pivot.add_trauma(0.18)
 
 func _equip_cloak_deferred() -> void:
 	if not auto_equip_cloak:
@@ -433,6 +480,18 @@ func _setup_c11_if_present() -> void:
 	for turn_name in ["Turn_left", "Turn_right", "turn_left", "turn_right"]:
 		if ap.has_animation(turn_name):
 			ap.get_animation(turn_name).loop_mode = Animation.LOOP_NONE
+	# Hold should loop (idle hold), Use should be one-shot
+	if ap.has_animation(HOLD_ANIM):
+		ap.get_animation(HOLD_ANIM).loop_mode = Animation.LOOP_LINEAR
+		print("[C11] Hold anim loop enabled: %s" % HOLD_ANIM)
+	if ap.has_animation(USE_ANIM):
+		ap.get_animation(USE_ANIM).loop_mode = Animation.LOOP_NONE
+	# Also ensure generic Upperbody_ variants loop correctly
+	for anim_name in ap.get_animation_list():
+		if anim_name.begins_with("UpperBody_ITEMHOLD") or anim_name.begins_with("Upperbody_ITEMHOLD"):
+			ap.get_animation(anim_name).loop_mode = Animation.LOOP_LINEAR
+		if anim_name.begins_with("UpperBody_ITEMUSE") or anim_name.begins_with("Upperbody_ITEMUSE"):
+			ap.get_animation(anim_name).loop_mode = Animation.LOOP_NONE
 	c11_ap = ap
 	# --- Layered vs Direct mode ---
 	if use_layered_anims and animator:
@@ -471,6 +530,526 @@ func _setup_layered_tree(ap: AnimationPlayer) -> void:
 	var upper_node = animator.tree_root.get_node("UpperOneShot")
 	if upper_node and upper_node is AnimationNodeOneShot:
 		upper_node.filter_enabled = true
+	# --- Hold layer defaults ---
+	var tree = animator.tree_root as AnimationNodeBlendTree
+	if tree and not tree.has_node("HoldAction"):
+		# Fallback: create hold nodes programmatically if scene was not updated
+		var hold_anim = AnimationNodeAnimation.new()
+		hold_anim.animation = StringName(HOLD_ANIM)
+		tree.add_node("HoldAction", hold_anim)
+		var hold_scale = AnimationNodeTimeScale.new()
+		tree.add_node("HoldScale", hold_scale)
+		var hold_oneshot = AnimationNodeOneShot.new()
+		hold_oneshot.filter_enabled = true
+		if upper_node and upper_node is AnimationNodeOneShot:
+			hold_oneshot.filters = (upper_node.filters as Array).duplicate()
+		hold_oneshot.fadein_time = 0.25
+		hold_oneshot.fadeout_time = 0.22
+		tree.add_node("HoldOneShot", hold_oneshot)
+		# Rewire: ground -> HoldOneShot -> UpperOneShot
+		# disconnect existing UpperOneShot input 0 if needed
+		# Try safe disconnect/connect
+		var ok_disc = false
+		# Godot 4.4 has disconnect_node(name, idx); use try
+		if tree.has_node("HoldOneShot") and tree.has_node("UpperOneShot"):
+			# disconnect UpperOneShot 0 if connected to ground
+			tree.disconnect_node("UpperOneShot", 0)
+			tree.connect_node("HoldOneShot", 0, "ground_air_transition")
+			tree.connect_node("HoldScale", 0, "HoldAction")
+			tree.connect_node("HoldOneShot", 1, "HoldScale")
+			tree.connect_node("UpperOneShot", 0, "HoldOneShot")
+			print("[C11] HoldOneShot created programmatically")
+	else:
+		# Ensure Hold nodes have correct filter/animation
+		var hold_anim_node = animator.tree_root.get_node("HoldAction") as AnimationNodeAnimation
+		if hold_anim_node and ap.has_animation(HOLD_ANIM):
+			hold_anim_node.animation = StringName(HOLD_ANIM)
+		var hold_node = animator.tree_root.get_node("HoldOneShot")
+		if hold_node and hold_node is AnimationNodeOneShot:
+			hold_node.filter_enabled = true
+			hold_node.fadein_time = 0.25
+			hold_node.fadeout_time = 0.22
+			if upper_node and upper_node.filters.size() > 0:
+				# Ensure filters sync
+				pass
+	animator.set("parameters/HoldOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_NONE)
+	animator.set("parameters/HoldScale/scale", 1.0)
+	# If we already hold item from deferred attach, re-enter hold
+	if _is_holding and held_item:
+		_enter_hold_state()
+
+# ============================================================
+# Hand Hold System — single HAND slot, bone-filtered hold loop
+# ============================================================
+func _get_hand_bone_candidates() -> Array[String]:
+	return ["hand.r", "hand_r", "hand.r.x", "hand_r.x", "RightHand", "c_hand_fk.r", "hand.R", "Hand_R"]
+
+func _find_hand_bone(skel: Skeleton3D) -> int:
+	if skel == null:
+		return -1
+	for cand in _get_hand_bone_candidates():
+		var idx := skel.find_bone(cand)
+		if idx != -1:
+			_hand_bone_name = cand
+			return idx
+		# case-insensitive fallback
+		for i in range(skel.get_bone_count()):
+			if skel.get_bone_name(i).to_lower() == cand.to_lower():
+				_hand_bone_name = skel.get_bone_name(i)
+				return i
+	# last resort: any bone containing hand and r
+	for i in range(skel.get_bone_count()):
+		var bn := skel.get_bone_name(i).to_lower()
+		if "hand" in bn and (".r" in bn or "_r" in bn or "right" in bn):
+			_hand_bone_name = skel.get_bone_name(i)
+			return i
+	return -1
+
+func _ensure_hand_attachment() -> BoneAttachment3D:
+	if hand_attachment and is_instance_valid(hand_attachment):
+		return hand_attachment
+	var skel := _get_skeleton()
+	if skel == null:
+		push_warning("[HandHold] No skeleton for hand attachment")
+		return null
+	var idx := _find_hand_bone(skel)
+	if idx == -1:
+		push_warning("[HandHold] Right hand bone not found, fallback to hand.r")
+		_hand_bone_name = "hand.r"
+	else:
+		print("[HandHold] Using hand bone '%s' idx=%d" % [_hand_bone_name, idx])
+	hand_attachment = BoneAttachment3D.new()
+	hand_attachment.name = "HandHoldAttachment"
+	hand_attachment.bone_name = _hand_bone_name
+	# Use use_external_skeleton if needed? BoneAttachment3D handles it automatically when parent is Skeleton3D
+	skel.add_child(hand_attachment)
+	# Ensure attachment is at origin initially
+	hand_attachment.position = Vector3.ZERO
+	hand_attachment.rotation = Vector3.ZERO
+	return hand_attachment
+
+func attach_held_item(data: ItemData) -> bool:
+	if data == null:
+		return false
+	if _is_holding and held_item == data:
+		# Already holding same — idempotent
+		return true
+	# Capacity check: allow if inventory already contains this exact data (we already added), else block if full
+	if inventory and inventory.has_method("is_hand_full") and inventory.has_method("get_held_item"):
+		if inventory.is_hand_full():
+			var held_in_inv: ItemData = inventory.get_held_item()
+			if held_in_inv != data and held_item != data:
+				print("[HandHold] HAND full, cannot attach '%s' (holding '%s')" % [data.display_name, held_in_inv.display_name if held_in_inv else "?"] )
+				return false
+	elif inventory and inventory.has_method("is_hand_full") and inventory.is_hand_full() and held_item != data:
+		print("[HandHold] HAND full, cannot attach '%s'" % data.display_name)
+		return false
+	# If already holding different, drop first? spec says hold only one — caller should block
+	if _is_holding and held_item != null and held_item != data:
+		print("[HandHold] Already holding '%s', cannot attach '%s'" % [held_item.display_name, data.display_name])
+		return false
+	held_item = data
+	_is_holding = true
+	# Inventory sync (if not already added via pickup, ensure it is)
+	if inventory and inventory.has_method("has_item") and not inventory.has_item(data):
+		# Only add if empty or if held item is this data; Inventory will enforce capacity
+		if inventory.has_method("can_pickup") and not inventory.can_pickup():
+			# inventory is full with different item — shouldn't happen because we checked above, but keep warning
+			var hi: ItemData = inventory.get_held_item() if inventory.has_method("get_held_item") else null
+			if hi != data:
+				print("[HandHold] Inventory HAND full, cannot sync '%s'" % data.display_name)
+				held_item = null
+				_is_holding = false
+				return false
+		if inventory.has_method("can_pickup") and inventory.can_pickup():
+			inventory.add_item(data)
+		elif not inventory.has_method("can_pickup"):
+			inventory.add_item(data)
+	# Visual
+	_create_held_visual(data)
+	_enter_hold_state()
+	print("[HandHold] Attached '%s' usable=%s to hand '%s'" % [data.display_name, str(data.is_usable), _hand_bone_name])
+	return true
+
+func _create_held_visual(data: ItemData) -> void:
+	_detach_held_visual()
+	var attach := _ensure_hand_attachment()
+	if attach == null:
+		return
+	var vis: Node3D = null
+	if data.scene:
+		var inst = data.scene.instantiate()
+		# If scene is BoneAttachment (wearable), extract mesh child
+		if inst is BoneAttachment3D:
+			# Find mesh inside
+			var mi = (inst as BoneAttachment3D).find_child("CloakMesh", true, false) as MeshInstance3D
+			if mi == null:
+				mi = _find_mesh_in_node(inst)
+			if mi:
+				# detach mesh from BoneAttachment and add to hand
+				var mesh_copy := _clone_meshinstance(mi)
+				vis = mesh_copy
+			inst.queue_free()
+		elif inst is Node3D:
+			vis = inst as Node3D
+		else:
+			vis = inst as Node3D
+	elif data.mesh:
+		var mi := MeshInstance3D.new()
+		mi.mesh = data.mesh
+		if data.material:
+			mi.material_override = data.material
+			mi.set_surface_override_material(0, data.material)
+		vis = mi
+	else:
+		# Fallback primitive based on item_id/color
+		var mi2 := MeshInstance3D.new()
+		var shape: Mesh
+		if data.is_usable:
+			var sph := SphereMesh.new()
+			sph.radius = 0.12
+			sph.height = 0.24
+			shape = sph
+		else:
+			var box := BoxMesh.new()
+			box.size = Vector3(0.18, 0.18, 0.18)
+			shape = box
+		mi2.mesh = shape
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = data.preview_color
+		mat.roughness = 0.6
+		mat.metallic = 0.1
+		mi2.material_override = mat
+		vis = mi2
+	if vis == null:
+		return
+	# Apply hold transform from ItemData
+	vis.position = data.hold_offset
+	vis.rotation_degrees = data.hold_rotation_deg
+	vis.scale = data.hold_scale
+	# Smooth attach: start small + offset then tween to target
+	var target_pos := vis.position
+	var target_rot := vis.rotation
+	var target_scale := vis.scale
+	vis.scale = target_scale * 0.01
+	vis.position = target_pos + Vector3(0,0.4,0)
+	attach.add_child(vis)
+	held_instance = vis
+	if _hold_attach_tween and _hold_attach_tween.is_valid():
+		_hold_attach_tween.kill()
+	_hold_attach_tween = create_tween()
+	_hold_attach_tween.set_parallel(true)
+	_hold_attach_tween.tween_property(vis, "scale", target_scale, 0.28).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	_hold_attach_tween.tween_property(vis, "position", target_pos, 0.28).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	# Slight rotation settle
+	if target_rot.length() > 0.01:
+		vis.rotation = target_rot + Vector3(0, 0.8, 0)
+		_hold_attach_tween.tween_property(vis, "rotation", target_rot, 0.32).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+
+func _find_mesh_in_node(n: Node) -> MeshInstance3D:
+	if n is MeshInstance3D:
+		return n as MeshInstance3D
+	for c in n.get_children():
+		var r := _find_mesh_in_node(c)
+		if r:
+			return r
+	return null
+
+func _clone_meshinstance(src: MeshInstance3D) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.mesh = src.mesh
+	mi.material_override = src.material_override
+	# copy surface materials
+	if src.mesh:
+		for i in range(src.mesh.get_surface_count()):
+			var m = src.get_surface_override_material(i)
+			if m:
+				mi.set_surface_override_material(i, m)
+			else:
+				var sm = src.mesh.surface_get_material(i)
+				if sm:
+					mi.set_surface_override_material(i, sm)
+	if src.skin:
+		mi.skin = src.skin
+	if src.skeleton:
+		# Don't copy skeleton for hand item; we want static mesh
+		pass
+	return mi
+
+func _detach_held_visual() -> void:
+	if held_instance and is_instance_valid(held_instance):
+		held_instance.queue_free()
+	held_instance = null
+	if _hold_attach_tween and _hold_attach_tween.is_valid():
+		_hold_attach_tween.kill()
+		_hold_attach_tween = null
+
+func _enter_hold_state() -> void:
+	if c11_ap == null:
+		return
+	if not c11_ap.has_animation(HOLD_ANIM):
+		push_warning("[HandHold] Missing hold anim '%s', available: %s" % [HOLD_ANIM, str(c11_ap.get_animation_list())])
+		return
+	if use_layered_anims and animator and animator.active:
+		var hold_anim_node = animator.tree_root.get_node("HoldAction") as AnimationNodeAnimation
+		if hold_anim_node:
+			hold_anim_node.animation = StringName(HOLD_ANIM)
+		animator.set("parameters/HoldScale/scale", 1.0)
+		var hold_node = animator.tree_root.get_node("HoldOneShot") as AnimationNodeOneShot
+		if hold_node:
+			hold_node.fadein_time = 0.25
+			hold_node.fadeout_time = 0.22
+			hold_node.filter_enabled = true
+		animator.set("parameters/HoldOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_FIRE)
+		print("[HandHold] HOLD OneShot fired: %s (filtered upper, loops)" % HOLD_ANIM)
+	else:
+		# Direct mode fallback: just play hold
+		_play_c11(HOLD_ANIM, 0.25, 1.0)
+	_is_holding = true
+
+func _exit_hold_state() -> void:
+	if use_layered_anims and animator and animator.active:
+		animator.set("parameters/HoldOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_FADE_OUT)
+		print("[HandHold] HOLD faded out")
+	else:
+		if c11_ap and c11_ap.current_animation == HOLD_ANIM:
+			if c11_ap.has_animation("Idle"):
+				_play_c11("Idle", 0.2)
+	_is_holding = false
+	_is_using_item = false
+	_use_timer = 0.0
+
+func drop_held_item() -> bool:
+	if not _is_holding or held_item == null:
+		print("[HandHold] No item to drop")
+		return false
+	var data := held_item
+	# Remove from inventory HAND
+	if inventory and inventory.has_method("remove_item"):
+		inventory.remove_item(data)
+	held_item = null
+	_exit_hold_state()
+	_detach_held_visual()
+	_spawn_pickup_from_hand(data)
+	print("[HandHold] Dropped '%s' from hand" % data.display_name)
+	return true
+
+func _spawn_pickup_from_hand(data: ItemData) -> void:
+	var spawn_pos: Vector3 = global_position
+	var fwd: Vector3 = Vector3.FORWARD
+	if player_mesh:
+		fwd = player_mesh.global_basis.z.normalized()
+	elif spring_arm_pivot:
+		fwd = Vector3.FORWARD.rotated(Vector3.UP, spring_arm_pivot.rotation.y)
+	fwd.y = 0.12
+	if fwd.length() > 0.1:
+		spawn_pos += fwd.normalized() * 1.4
+	# If hand attachment exists, use its global pos
+	if hand_attachment and is_instance_valid(hand_attachment) and held_instance == null:
+		# held_instance already freed, but attachment pos is hand world
+		spawn_pos = hand_attachment.global_position + fwd * 0.3
+	spawn_pos.y = maxf(spawn_pos.y, global_position.y + 0.35)
+	var pickup_scene: PackedScene = null
+	# Try to load generic pickup for this item
+	if data.id == "cloak_01":
+		pickup_scene = load("res://Scenes/Items/CloakPickup.tscn") as PackedScene
+	elif data.id == "usable_01" or data.id.begins_with("usable"):
+		pickup_scene = load("res://Scenes/Items/UsablePickup.tscn") as PackedScene
+	elif data.id == "holdable_01" or data.id.begins_with("holdable"):
+		pickup_scene = load("res://Scenes/Items/RockPickup.tscn") as PackedScene
+	elif data.slot == ItemData.EquipSlot.HAND:
+		if data.is_usable:
+			pickup_scene = load("res://Scenes/Items/UsablePickup.tscn") as PackedScene
+		else:
+			pickup_scene = load("res://Scenes/Items/RockPickup.tscn") as PackedScene
+	var inst: Node3D = null
+	if pickup_scene:
+		inst = pickup_scene.instantiate() as Node3D
+		if inst:
+			# override item_data to our data
+			inst.set("item_data", data)
+			inst.set("item_name", data.display_name)
+			inst.set("item_id", data.id)
+			inst.set("wearable_scene", data.scene)
+			inst.set("equip_slot", data.slot)
+			inst.set("pickup_color", data.preview_color)
+	else:
+		var pickup_script = load("res://Scripts/Item/ItemPickup.gd")
+		var area = Area3D.new()
+		area.set_script(pickup_script)
+		# Setup mesh manually via ItemData
+		var mi := MeshInstance3D.new()
+		mi.name = "PickupMesh"
+		if data.mesh:
+			mi.mesh = data.mesh
+			if data.material:
+				mi.material_override = data.material
+		elif data.scene:
+			# Extract mesh from scene
+			var tmp = data.scene.instantiate()
+			var found = _find_mesh_in_node(tmp)
+			if found:
+				mi.mesh = found.mesh
+				mi.material_override = found.material_override
+			tmp.queue_free()
+		else:
+			var box := BoxMesh.new()
+			box.size = Vector3(0.22,0.22,0.22)
+			mi.mesh = box
+			var mat := StandardMaterial3D.new()
+			mat.albedo_color = data.preview_color
+			mi.material_override = mat
+		area.add_child(mi)
+		var cs := CollisionShape3D.new()
+		var sph := SphereShape3D.new()
+		sph.radius = 2.0
+		cs.shape = sph
+		area.add_child(cs)
+		area.set("item_data", data)
+		area.set("item_name", data.display_name)
+		area.set("item_id", data.id)
+		area.set("wearable_scene", data.scene)
+		area.set("equip_slot", data.slot)
+		area.set("pickup_color", data.preview_color)
+		area.set("auto_pickup", false)
+		area.set("require_interact", true)
+		inst = area
+	if inst:
+		var level = get_tree().current_scene
+		if level == null:
+			level = get_tree().root
+		if level:
+			level.add_child(inst)
+			inst.global_position = spawn_pos
+			# Ensure in pickup group for tests
+			if not inst.is_in_group("pickup"):
+				inst.add_to_group("pickup")
+			if not inst.is_in_group("item_pickup"):
+				inst.add_to_group("item_pickup")
+			# Add slight impulse / bounce visual
+			if inst.has_node("PickupMesh"):
+				var pm = inst.get_node("PickupMesh") as MeshInstance3D
+				if pm:
+					var tw := create_tween()
+					pm.scale = Vector3.ONE * 0.1
+					tw.tween_property(pm, "scale", data.hold_scale if data.hold_scale != Vector3.ZERO else Vector3.ONE, 0.32).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+			print("[HandHold] Spawned pickup '%s' at %s" % [data.display_name, str(spawn_pos)])
+		else:
+			push_warning("[HandHold] No level to spawn pickup")
+
+func try_use_held_item() -> bool:
+	if not _is_holding or held_item == null:
+		return false
+	if not held_item.is_usable:
+		print("[HandHold] Item '%s' not usable" % held_item.display_name)
+		return false
+	if _is_using_item:
+		return false
+	if c11_ap == null or not c11_ap.has_animation(USE_ANIM):
+		# fallback to generic use anim name from ItemData
+		var cand := held_item.use_anim
+		if c11_ap and c11_ap.has_animation(cand):
+			return _play_use_anim(cand)
+		print("[HandHold] Missing use anim '%s'" % USE_ANIM)
+		return false
+	return _play_use_anim(USE_ANIM)
+
+func _play_use_anim(anim: String) -> bool:
+	if c11_ap == null or not c11_ap.has_animation(anim):
+		return false
+	_is_using_item = true
+	var anim_len: float = c11_ap.get_animation(anim).length
+	_use_timer = anim_len / 1.0
+	if use_layered_anims and animator and animator.active:
+		var upper_anim_node = animator.tree_root.get_node("UpperAction") as AnimationNodeAnimation
+		if upper_anim_node:
+			upper_anim_node.animation = StringName(anim)
+		animator.set("parameters/UpperScale/scale", 1.0)
+		var upper_node = animator.tree_root.get_node("UpperOneShot") as AnimationNodeOneShot
+		if upper_node:
+			upper_node.filter_enabled = true
+			upper_node.fadein_time = 0.08
+			upper_node.fadeout_time = 0.14
+		animator.set("parameters/UpperOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_FIRE)
+		print("[HandHold] ITEMUSE fired: %s (filtered upper)" % anim)
+		# Return to hold after use — OneShot will fade back to HoldOneShot base
+		get_tree().create_timer(_use_timer + 0.14).timeout.connect(func():
+			_is_using_item = false
+			print("[HandHold] ITEMUSE finished, back to HOLD")
+		)
+	else:
+		_play_c11(anim, 0.08, 1.0)
+		get_tree().create_timer(_use_timer + 0.12).timeout.connect(func(): _is_using_item = false)
+	# Placeholder effect: heal 15 HP, emit particles
+	_do_use_effect()
+	return true
+
+func _do_use_effect() -> void:
+	if held_item == null:
+		return
+	print("[HandHold] Used '%s' — effect triggered" % held_item.display_name)
+	if health and health.has_method("heal"):
+		health.call("heal", 15.0)
+	elif health and "current" in health:
+		var cur: float = health.get("current")
+		var max_h: float = health.get("max_health")
+		health.set("current", clampf(cur + 15.0, 0, max_h))
+		print("[HandHold] Healed 15 HP (now %.0f/%.0f)" % [health.get("current"), health.get("max_health")])
+	# Visual flash
+	if player_mesh:
+		var tw := create_tween()
+		tw.tween_property(player_mesh, "scale", Vector3(1.08, 0.96, 1.08), 0.08)
+		tw.tween_property(player_mesh, "scale", Vector3.ONE, 0.14)
+	# Particle puff at hand
+	if hand_attachment:
+		var puff := GPUParticles3D.new()
+		puff.emitting = true
+		puff.amount = 12
+		puff.lifetime = 0.6
+		puff.one_shot = true
+		puff.explosiveness = 0.9
+		var mat := ParticleProcessMaterial.new()
+		mat.direction = Vector3(0,1,0)
+		mat.spread = 45.0
+		mat.initial_velocity_min = 1.2
+		mat.initial_velocity_max = 2.4
+		mat.gravity = Vector3(0, -1.5, 0)
+		mat.scale_min = 0.06
+		mat.scale_max = 0.12
+		mat.color = held_item.preview_color
+		puff.process_material = mat
+		var sphere := SphereMesh.new()
+		sphere.radius = 0.04
+		sphere.height = 0.08
+		puff.draw_pass_1 = sphere
+		hand_attachment.add_child(puff)
+		get_tree().create_timer(1.0).timeout.connect(func(): if is_instance_valid(puff): puff.queue_free())
+	# For consumable usable, optionally consume on use (keep for now, but log)
+	if held_item.type == ItemData.ItemType.CONSUMABLE:
+		print("[HandHold] Consumable used — you may want to drop/consume it (not auto-consumed)")
+
+func is_holding_item() -> bool:
+	return _is_holding and held_item != null
+
+func can_use_held_item() -> bool:
+	return is_holding_item() and held_item.is_usable and not _is_using_item
+
+func _is_action_blocked_when_holding(action: String) -> bool:
+	if not is_holding_item():
+		return false
+	if held_item and held_item.is_usable:
+		# Usable items allow walking/sprinting + ITEMUSE, block everything else (punch/dash/etc)
+		if action in ["punch", "dash", "jump", "grab", "throw", "pickup", "cloak"]:
+			# Allow punch to be remapped to USE — so punch not blocked but redirected
+			if action == "punch":
+				return false # let _try_attack handle redirect to USE
+			return true
+		return false
+	else:
+		# Non-usable: only walk/sprint allowed — block all other actions
+		if action in ["punch", "dash", "jump", "grab", "throw", "pickup", "attack", "cloak"]:
+			return true
+		return false
 
 func _is_upper_action_active() -> bool:
 	if animator and animator.active and use_layered_anims:
@@ -1094,6 +1673,14 @@ func _do_hurt_flash(is_crit: bool) -> void:
 	tw2.tween_property(player_mesh, "scale", Vector3.ONE, 0.13)
 
 func _try_attack() -> void:
+	# If holding usable, redirect to ITEMUSE instead of combo
+	if is_holding_item():
+		if held_item and held_item.is_usable:
+			if try_use_held_item():
+				return
+		else:
+			print("[HandHold] Attack blocked — holding non-usable '%s'" % held_item.display_name)
+			return
 	var now := Time.get_ticks_msec()
 	if now - _last_try_msec < 70:
 		return
@@ -1110,6 +1697,8 @@ func _try_attack() -> void:
 	if not is_on_floor():
 		return
 	if _stun_timer > 0.0:
+		return
+	if _is_action_blocked_when_holding("punch"):
 		return
 	if not is_attacking:
 		_play_attack(0)
@@ -1362,6 +1951,18 @@ func _on_c11_animation_finished(anim_name: String) -> void:
 		if not (use_layered_anims and animator and animator.active):
 			_play_c11("Idle")
 		return
+	# Handle ITEMUSE finish (hand hold use)
+	if anim_name == USE_ANIM or anim_name.to_lower().begins_with("upperbody_itemuse"):
+		_is_using_item = false
+		_use_timer = 0.0
+		c11_current_anim = ""
+		_upper_action_active = false
+		_is_fullbody_action = false
+		print("[HandHold] USE anim finished: %s" % anim_name)
+		return
+	if anim_name == HOLD_ANIM or anim_name.to_lower().begins_with("upperbody_itemhold"):
+		# Hold loops — should not finish unless faded out
+		return
 	if anim_name not in COMBO_ANIMS:
 		# Also clear throw/punch filtered upper when generic upper finishes
 		if anim_name in ["throw", "beam", "Summon", "NO"]:
@@ -1398,6 +1999,12 @@ func _on_c11_animation_finished(anim_name: String) -> void:
 			_has_hit_this_swing = false
 
 func _try_dash() -> bool:
+	if _is_action_blocked_when_holding("dash"):
+		print("[HandHold] Dash blocked — holding '%s'" % (held_item.display_name if held_item else "item"))
+		return false
+	if _is_using_item:
+		print("[Dash] guard: using item")
+		return false
 	if c11_ap == null:
 		print("[Dash] guard: c11_ap null")
 		return false
@@ -1603,16 +2210,32 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 		# Toggle cloak with C
 		if event.keycode == KEY_C:
-			toggle_cloak()
+			if _is_action_blocked_when_holding("cloak"):
+				print("[HandHold] Cloak toggle blocked while holding")
+			else:
+				toggle_cloak()
 			get_viewport().set_input_as_handled()
 			return
-		# Grab ragdoll / Pick up item with F (grab takes priority)
+		# Grab ragdoll / Pick up item with F (grab takes priority) — when holding usable, F triggers USE
 		if event.keycode == KEY_F:
+			if is_holding_item() and held_item and held_item.is_usable:
+				if try_use_held_item():
+					get_viewport().set_input_as_handled()
+					return
 			if _try_grab_or_pickup():
 				get_viewport().set_input_as_handled()
 				return
-		# Throw (upper-body while walking) with G / Q
+		# Drop held item or Throw (upper-body while walking) with G / Q
 		if event.keycode == KEY_G or event.keycode == KEY_Q:
+			if is_holding_item():
+				# Drop takes priority over throw when holding
+				if event.keycode == KEY_G:
+					drop_held_item()
+				else:
+					# Q while holding usable could also trigger use? Keep drop for both
+					drop_held_item()
+				get_viewport().set_input_as_handled()
+				return
 			if c11_ap and c11_ap.has_animation("throw"):
 				if not is_picking_up and not (is_attacking and _is_fullbody_action):
 					is_picking_up = true
@@ -1629,6 +2252,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			_try_attack()
 
 func _try_grab_or_pickup() -> bool:
+	if _is_action_blocked_when_holding("grab"):
+		print("[HandHold] Grab blocked while holding '%s'" % held_item.display_name)
+		return false
 	# If currently grabbing, release first (F toggles)
 	if grabber and grabber.is_grabbing():
 		grabber.release_grab()
@@ -1680,10 +2306,18 @@ func _play_grab_pickup_anim() -> void:
 						player_mesh.look_at(global_position - dir.normalized(), Vector3.UP)
 
 func _try_interact_pickup() -> bool:
+	if _is_action_blocked_when_holding("pickup"):
+		if is_holding_item():
+			print("[HandHold] Pickup blocked — HAND full with '%s' (drop with G)" % held_item.display_name)
+		return false
 	if is_picking_up:
 		return false
 	# In layered mode, allow pickup while punching (upper queue) — only block if fullbody kick
 	if is_attacking and _is_fullbody_action:
+		return false
+	# Hand full check — block picking another
+	if is_holding_item():
+		print("[HandHold] Cannot pick up — already holding '%s'" % held_item.display_name)
 		return false
 	
 	var best_pickup: Node3D = null
@@ -2048,7 +2682,9 @@ func _physics_process(delta: float) -> void:
 	# ---- Jump / snap ----
 	var just_landed: bool = is_on_floor() and not was_on_floor
 	var block_jump := is_attacking and (_is_fullbody_action or not use_layered_anims)
-	var can_jump := coyote_timer > 0.0 and jump_buffer_timer > 0.0 and not block_jump and _stun_timer <= 0.0
+	if _is_action_blocked_when_holding("jump"):
+		block_jump = true
+	var can_jump := coyote_timer > 0.0 and jump_buffer_timer > 0.0 and not block_jump and _stun_timer <= 0.0 and not _is_using_item
 	if Input.is_action_just_released("jump") and velocity.y > 2.0:
 		velocity.y *= jump_cut_multiplier
 	if can_jump:

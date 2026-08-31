@@ -1,0 +1,24 @@
+[gd_resource type="Resource" script_class="ItemData" format=3]
+
+[ext_resource type="Script" path="res://Scripts/Item/ItemData.gd" id="1_data"]
+
+[resource]
+script = ExtResource("1_data")
+id = "usable_01"
+display_name = "Energy Cell"
+description = "Usable holdable — hold in right hand (UpperBody_ITEMHOLD). Press LMB or F to trigger UpperBody_ITEMUSE (heals 15 HP). Drop with G."
+type = 4
+slot = 6
+icon = null
+scene = null
+mesh = null
+material = null
+bone_name = "hand.r"
+preview_color = Color(0.2, 0.85, 1.0, 1)
+is_holdable = true
+is_usable = true
+use_anim = "UpperBody_ITEMUSE"
+hold_anim = "UpperBody_ITEMHOLD"
+hold_offset = Vector3(0.02, -0.02, 0.08)
+hold_rotation_deg = Vector3(0, 90, 0)
+hold_scale = Vector3(1, 1, 1)

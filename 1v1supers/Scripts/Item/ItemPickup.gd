@@ -89,7 +89,7 @@ func _process(delta: float) -> void:
 		_mesh.rotation.y += deg_to_rad(rotation_speed) * delta
 	# Interact check
 	if require_interact and not auto_pickup and not _picked:
-		if _inside_bodies.size() > 0 and (Input.is_key_pressed(KEY_F) or Input.is_action_just_pressed("interact")):
+		if _inside_bodies.size() > 0 and (Input.is_key_pressed(KEY_F) or (InputMap.has_action("interact") and Input.is_action_just_pressed("interact"))):
 			for body in _inside_bodies:
 				if _is_player(body):
 					if body.has_method("_try_interact_pickup"):
@@ -142,22 +142,82 @@ func _get_or_create_item_data() -> ItemData:
 	data.scene = wearable_scene
 	data.bone_name = bone_name
 	data.preview_color = pickup_color
+	# infer hand item if not cape
+	if equip_slot == ItemData.EquipSlot.HAND or wearable_scene == null:
+		data.is_holdable = true
+		data.slot = ItemData.EquipSlot.HAND
+		data.type = ItemData.ItemType.HOLDABLE
+		if item_id.begins_with("usable"):
+			data.is_usable = true
 	item_data = data
 	return item_data
 
 func _try_pickup(body: Node) -> bool:
 	if _picked:
 		return false
-	
-	# Priority: Add to Inventory bag
-	var inv = body.get_node_or_null("Inventory")
-	if inv and inv.has_method("add_item"):
-		var data = _get_or_create_item_data()
-		inv.add_item(data)
+	var data := _get_or_create_item_data()
+	# --- HAND items --- if it's holdable/hand slot, go via Inventory HAND + hand attach
+	if data.is_hand_item() or data.slot == ItemData.EquipSlot.HAND or equip_slot == ItemData.EquipSlot.HAND:
+		var inv = body.get_node_or_null("Inventory")
+		if inv and inv.has_method("can_pickup"):
+			if not inv.can_pickup():
+				print("[Pickup] HAND full - cannot pick '%s' (drop current first with G / Inventory)" % data.display_name)
+				# optional feedback ping
+				if body.has_method("_on_hand_full_feedback"):
+					body.call("_on_hand_full_feedback")
+				return false
+		if inv and inv.has_method("add_item"):
+			inv.add_item(data)
+			# Player handles visual attach + hold anim via held_item_changed signal
+			# but also call directly for smooth attach if inventory didn't block
+			if body.has_method("attach_held_item"):
+				body.call("attach_held_item", data)
+			_do_pickup_effect(body)
+			return true
+		# fallback direct attach without inventory
+		if body.has_method("attach_held_item"):
+			var ok: bool = body.call("attach_held_item", data)
+			if ok:
+				_do_pickup_effect(body)
+				return true
+	# --- Legacy wearable path: try Equipment first is disabled when hand logic applies
+	# For wearable cloaks we keep old behaviour but still check HAND capacity?
+	# If data is wearable and not hand, allow both? Hand items block but wearable cloak still equips via Equipment
+	if data.is_wearable() and data.slot != ItemData.EquipSlot.HAND and wearable_scene != null:
+		# check if player wants to equip wearable directly (Tab inventory flow)
+		# but if hand is full, still allow wearable equip via Inventory bag? For now treat wearable as hand also? Cloak should bypass HAND
+		# keep legacy path
+		var equipped: bool = false
+		if body.has_node("Equipment"):
+			var equip = body.get_node("Equipment")
+			if equip and equip.has_method("equip_wearable") and wearable_scene:
+				if equip.has_method("has_equipped") and equip.call("has_equipped", data.slot):
+					print("[Pickup] Player already has item in slot %d" % data.slot)
+					return false
+				var ins = equip.call("equip_wearable", wearable_scene, data.slot, data.bone_name)
+				equipped = ins != null
+				if equipped and ins is WearableItem and body.has_method("set"):
+					if "cloak" in body:
+						body.set("cloak", ins)
+					if "cloak_color" in body and ins.has_method("set_color"):
+						ins.call("set_color", body.get("cloak_color"))
+		if equipped:
+			# also add to inventory bag for UI? but HAND inventory is separate - wearable not added to hand
+			_do_pickup_effect(body)
+			return true
+	# Fallback: Add to Inventory HAND bag
+	var inv2 = body.get_node_or_null("Inventory")
+	if inv2 and inv2.has_method("add_item"):
+		if inv2.has_method("can_pickup") and not inv2.can_pickup():
+			print("[Pickup] HAND full")
+			return false
+		inv2.add_item(data)
+		if body.has_method("attach_held_item"):
+			body.call("attach_held_item", data)
 		_do_pickup_effect(body)
 		return true
 
-	var equipped: bool = false
+	var equipped2: bool = false
 	# Priority 1: Equipment node direct (fallback if no inventory)
 	if body.has_node("Equipment"):
 		var equip = body.get_node("Equipment")
@@ -167,29 +227,29 @@ func _try_pickup(body: Node) -> bool:
 				print("[Pickup] Player already has item in slot %d" % equip_slot)
 				return false
 			var ins = equip.call("equip_wearable", wearable_scene, equip_slot, bone_name)
-			equipped = ins != null
-			if equipped and ins is WearableItem and body.has_method("set"):
+			equipped2 = ins != null
+			if equipped2 and ins is WearableItem and body.has_method("set"):
 				# Sync cloak var on Player if exists
 				if "cloak" in body:
 					body.set("cloak", ins)
 				if "cloak_color" in body and ins.has_method("set_color"):
 					ins.call("set_color", body.get("cloak_color"))
 		elif equip and wearable_scene == null:
-			equipped = false
-	if not equipped and wearable_scene and body.has_method("add_child"):
+			equipped2 = false
+	if not equipped2 and wearable_scene and body.has_method("add_child"):
 		# Fallback: instance wearable and try equip via WearableItem
 		var skel: Skeleton3D = _find_skeleton(body)
 		if skel:
 			var inst = wearable_scene.instantiate()
 			if inst is WearableItem:
-				equipped = (inst as WearableItem).equip(skel, bone_name)
-				if equipped:
+				equipped2 = (inst as WearableItem).equip(skel, bone_name)
+				if equipped2:
 					print("[Pickup] Equipped via skeleton")
 					if "cloak" in body:
 						body.set("cloak", inst)
 				else:
 					inst.queue_free()
-	if not equipped and body.has_method("equip_cloak"):
+	if not equipped2 and body.has_method("equip_cloak"):
 		var has_cloak: bool = false
 		if "cloak" in body and body.get("cloak") != null and is_instance_valid(body.get("cloak")):
 			var c = body.get("cloak")
@@ -202,13 +262,13 @@ func _try_pickup(body: Node) -> bool:
 			var equip2 = body.get_node("Equipment")
 			if equip2 and equip2.has_method("equip_wearable") and wearable_scene:
 				var ins2 = equip2.call("equip_wearable", wearable_scene, equip_slot, bone_name)
-				equipped = ins2 != null
-		if not equipped:
+				equipped2 = ins2 != null
+		if not equipped2:
 			body.call("equip_cloak")
-			equipped = true
-	if not equipped:
-		equipped = _force_equip(body)
-	if equipped:
+			equipped2 = true
+	if not equipped2:
+		equipped2 = _force_equip(body)
+	if equipped2:
 		_do_pickup_effect(body)
 		return true
 	return false
