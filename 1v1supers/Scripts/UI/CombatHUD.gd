@@ -6,6 +6,8 @@ var player_health: Node
 var combo_label: Label
 var hp_bar: ProgressBar
 var hp_label: Label
+var stamina_bar: ProgressBar
+var stamina_label: Label
 var instruction: Label
 var hit_marker: Control
 var cross: Label
@@ -58,6 +60,36 @@ func _ready() -> void:
 	hp_label.add_theme_color_override("font_color", Color.WHITE)
 	root.add_child(hp_label)
 
+	# Stamina bar (under HP)
+	stamina_bar = ProgressBar.new()
+	stamina_bar.position = Vector2(18, 42)
+	stamina_bar.size = Vector2(260, 12)
+	stamina_bar.max_value = 100
+	stamina_bar.value = 100
+	stamina_bar.show_percentage = false
+	var sb_stam_bg := StyleBoxFlat.new()
+	sb_stam_bg.bg_color = Color(0.08, 0.08, 0.08, 0.85)
+	sb_stam_bg.corner_radius_top_left = 4
+	sb_stam_bg.corner_radius_top_right = 4
+	sb_stam_bg.corner_radius_bottom_left = 4
+	sb_stam_bg.corner_radius_bottom_right = 4
+	var sb_stam_fg := StyleBoxFlat.new()
+	sb_stam_fg.bg_color = Color(0.32, 0.78, 1.0)
+	sb_stam_fg.corner_radius_top_left = 4
+	sb_stam_fg.corner_radius_top_right = 4
+	sb_stam_fg.corner_radius_bottom_left = 4
+	sb_stam_fg.corner_radius_bottom_right = 4
+	stamina_bar.add_theme_stylebox_override("background", sb_stam_bg)
+	stamina_bar.add_theme_stylebox_override("fill", sb_stam_fg)
+	root.add_child(stamina_bar)
+
+	stamina_label = Label.new()
+	stamina_label.position = Vector2(22, 40)
+	stamina_label.text = "ST 100 / 100"
+	stamina_label.add_theme_font_size_override("font_size", 10)
+	stamina_label.add_theme_color_override("font_color", Color.WHITE)
+	root.add_child(stamina_label)
+
 	# Combo label
 	combo_label = Label.new()
 	combo_label.position = Vector2(18, 46)
@@ -66,12 +98,14 @@ func _ready() -> void:
 	combo_label.add_theme_color_override("font_color", Color(1,0.92,0.28))
 	root.add_child(combo_label)
 
-	# Instructions
+	# Prototype title (centered, large)
 	instruction = Label.new()
-	instruction.position = Vector2(18, get_viewport().get_visible_rect().size.y - 56)
-	instruction.text = "LMB: Punch (aims at crosshair)  |  RMB: Aim  |  SHIFT: Sprint  |  WASD: Move  |  SPACE: Jump  |  F: Pick up  |  TAB: Inventory  |  ESC: Unlock mouse"
-	instruction.add_theme_font_size_override("font_size", 13)
+	instruction.text = "GOOF - prototype"
+	instruction.add_theme_font_size_override("font_size", 22)
 	instruction.modulate = Color(1,1,1,0.78)
+	instruction.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	instruction.position = Vector2(get_viewport().get_visible_rect().size.x / 2 - 90, 18)
+	instruction.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	root.add_child(instruction)
 
 	# Hit marker (center flash)
@@ -116,6 +150,25 @@ func _process(_delta: float) -> void:
 	var aiming: bool = player.get("is_aiming") if player.get("is_aiming") != null else false
 	if cross:
 		cross.visible = aiming
+	# Stamina bar — driven by player.stamina / player.max_stamina
+	if stamina_bar:
+		var cur_stam: float = player.get("stamina") if player.get("stamina") != null else 100.0
+		var max_stam: float = player.get("max_stamina") if player.get("max_stamina") != null else 100.0
+		stamina_bar.max_value = max_stam
+		stamina_bar.value = cur_stam
+		var pct_stam: float = cur_stam / maxf(max_stam, 1.0)
+		var sb_s = stamina_bar.get_theme_stylebox("fill")
+		if sb_s is StyleBoxFlat:
+			if pct_stam > 0.5:
+				(sb_s as StyleBoxFlat).bg_color = Color(0.32, 0.78, 1.0)
+			elif pct_stam > 0.25:
+				(sb_s as StyleBoxFlat).bg_color = Color(1.0, 0.82, 0.15)
+			else:
+				(sb_s as StyleBoxFlat).bg_color = Color(1.0, 0.22, 0.22)
+	if stamina_label:
+		var cs2: float = player.get("stamina") if player.get("stamina") != null else 100.0
+		var ms2: float = player.get("max_stamina") if player.get("max_stamina") != null else 100.0
+		stamina_label.text = "ST %d / %d" % [int(cs2), int(ms2)]
 	# Combo display
 	var idx: int = player.get("combo_index") if player.get("combo_index") != null else 0
 	var attacking: bool = player.get("is_attacking") if player.get("is_attacking") != null else false

@@ -156,121 +156,28 @@ func _try_pickup(body: Node) -> bool:
 	if _picked:
 		return false
 	var data := _get_or_create_item_data()
-	# --- HAND items --- if it's holdable/hand slot, go via Inventory HAND + hand attach
-	if data.is_hand_item() or data.slot == ItemData.EquipSlot.HAND or equip_slot == ItemData.EquipSlot.HAND:
-		var inv = body.get_node_or_null("Inventory")
-		if inv and inv.has_method("can_pickup"):
-			if not inv.can_pickup():
-				print("[Pickup] HAND full - cannot pick '%s' (drop current first with G / Inventory)" % data.display_name)
-				# optional feedback ping
-				if body.has_method("_on_hand_full_feedback"):
-					body.call("_on_hand_full_feedback")
-				return false
-		if inv and inv.has_method("add_item"):
-			inv.add_item(data)
-			# Player handles visual attach + hold anim via held_item_changed signal
-			# but also call directly for smooth attach if inventory didn't block
-			if body.has_method("attach_held_item"):
-				body.call("attach_held_item", data)
-			_do_pickup_effect(body)
-			return true
-		# fallback direct attach without inventory
-		if body.has_method("attach_held_item"):
-			var ok: bool = body.call("attach_held_item", data)
-			if ok:
-				_do_pickup_effect(body)
-				return true
-	# --- Legacy wearable path: try Equipment first is disabled when hand logic applies
-	# For wearable cloaks we keep old behaviour but still check HAND capacity?
-	# If data is wearable and not hand, allow both? Hand items block but wearable cloak still equips via Equipment
-	if data.is_wearable() and data.slot != ItemData.EquipSlot.HAND and wearable_scene != null:
-		# check if player wants to equip wearable directly (Tab inventory flow)
-		# but if hand is full, still allow wearable equip via Inventory bag? For now treat wearable as hand also? Cloak should bypass HAND
-		# keep legacy path
-		var equipped: bool = false
-		if body.has_node("Equipment"):
-			var equip = body.get_node("Equipment")
-			if equip and equip.has_method("equip_wearable") and wearable_scene:
-				if equip.has_method("has_equipped") and equip.call("has_equipped", data.slot):
-					print("[Pickup] Player already has item in slot %d" % data.slot)
-					return false
-				var ins = equip.call("equip_wearable", wearable_scene, data.slot, data.bone_name)
-				equipped = ins != null
-				if equipped and ins is WearableItem and body.has_method("set"):
-					if "cloak" in body:
-						body.set("cloak", ins)
-					if "cloak_color" in body and ins.has_method("set_color"):
-						ins.call("set_color", body.get("cloak_color"))
-		if equipped:
-			# also add to inventory bag for UI? but HAND inventory is separate - wearable not added to hand
-			_do_pickup_effect(body)
-			return true
-	# Fallback: Add to Inventory HAND bag
-	var inv2 = body.get_node_or_null("Inventory")
-	if inv2 and inv2.has_method("add_item"):
-		if inv2.has_method("can_pickup") and not inv2.can_pickup():
-			print("[Pickup] HAND full")
+	# Cape is now just like any other item: must go into HAND first.
+	# Wearable equip happens ONLY via InventoryUI drag & drop (HAND -> CAPE slot).
+	# Do NOT auto-equip wearables on pickup — HAND must not be busy.
+	var inv = body.get_node_or_null("Inventory")
+	if inv and inv.has_method("can_pickup"):
+		if not inv.can_pickup():
+			print("[Pickup] HAND full - cannot pick '%s' (drop current first with G / Inventory)" % data.display_name)
+			if body.has_method("_on_hand_full_feedback"):
+				body.call("_on_hand_full_feedback")
 			return false
-		inv2.add_item(data)
+	if inv and inv.has_method("add_item"):
+		inv.add_item(data)
 		if body.has_method("attach_held_item"):
 			body.call("attach_held_item", data)
 		_do_pickup_effect(body)
 		return true
-
-	var equipped2: bool = false
-	# Priority 1: Equipment node direct (fallback if no inventory)
-	if body.has_node("Equipment"):
-		var equip = body.get_node("Equipment")
-		if equip and equip.has_method("equip_wearable") and wearable_scene:
-			# Check already equipped
-			if equip.has_method("has_equipped") and equip.call("has_equipped", equip_slot):
-				print("[Pickup] Player already has item in slot %d" % equip_slot)
-				return false
-			var ins = equip.call("equip_wearable", wearable_scene, equip_slot, bone_name)
-			equipped2 = ins != null
-			if equipped2 and ins is WearableItem and body.has_method("set"):
-				# Sync cloak var on Player if exists
-				if "cloak" in body:
-					body.set("cloak", ins)
-				if "cloak_color" in body and ins.has_method("set_color"):
-					ins.call("set_color", body.get("cloak_color"))
-		elif equip and wearable_scene == null:
-			equipped2 = false
-	if not equipped2 and wearable_scene and body.has_method("add_child"):
-		# Fallback: instance wearable and try equip via WearableItem
-		var skel: Skeleton3D = _find_skeleton(body)
-		if skel:
-			var inst = wearable_scene.instantiate()
-			if inst is WearableItem:
-				equipped2 = (inst as WearableItem).equip(skel, bone_name)
-				if equipped2:
-					print("[Pickup] Equipped via skeleton")
-					if "cloak" in body:
-						body.set("cloak", inst)
-				else:
-					inst.queue_free()
-	if not equipped2 and body.has_method("equip_cloak"):
-		var has_cloak: bool = false
-		if "cloak" in body and body.get("cloak") != null and is_instance_valid(body.get("cloak")):
-			var c = body.get("cloak")
-			if c and c.visible:
-				has_cloak = true
-		if has_cloak:
-			print("[Pickup] Player already has cloak")
-			return false
-		if body.has_node("Equipment"):
-			var equip2 = body.get_node("Equipment")
-			if equip2 and equip2.has_method("equip_wearable") and wearable_scene:
-				var ins2 = equip2.call("equip_wearable", wearable_scene, equip_slot, bone_name)
-				equipped2 = ins2 != null
-		if not equipped2:
-			body.call("equip_cloak")
-			equipped2 = true
-	if not equipped2:
-		equipped2 = _force_equip(body)
-	if equipped2:
-		_do_pickup_effect(body)
-		return true
+	# fallback direct attach without inventory (no Inventory node)
+	if body.has_method("attach_held_item"):
+		var ok: bool = body.call("attach_held_item", data)
+		if ok:
+			_do_pickup_effect(body)
+			return true
 	return false
 
 func _force_equip(body: Node) -> bool:

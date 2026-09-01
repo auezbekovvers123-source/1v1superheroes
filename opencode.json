@@ -5,6 +5,13 @@
       "type": "local",
       "command": ["uvx", "--prerelease", "allow", "godot-editor-mcp"],
       "enabled": true
+    },
+    "better_godot_mcp": {
+      "type": "remote",
+      "url": "http://127.0.0.1:3000/mcp",
+      "enabled": true,
+      "headers": {},
+      "oauth": false
     }
   }
 }

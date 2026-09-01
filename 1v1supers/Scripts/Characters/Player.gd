@@ -8,6 +8,10 @@ const InventoryCls = preload("res://Scripts/Item/Inventory.gd")
 const RagdollCls = preload("res://Scripts/Combat/RagdollController.gd")
 const GrabberCls = preload("res://Scripts/Combat/RagdollGrabber.gd")
 const ThrownItemCls = preload("res://Scripts/Item/ThrownItem.gd")
+const FOOTSTEP_STREAMS: Array[AudioStream] = [
+	preload("res://Assets/Sounds/Footsteps/JDSherbert - Footstep Foley SFX Pack - Footstep (Concrete - 1).mp3"),
+	preload("res://Assets/Sounds/Footsteps/JDSherbert - Footstep Foley SFX Pack - Footstep (Concrete - 2).mp3"),
+]
 ## Player.gd — Third-person CharacterBody3D controller + SATISFYING COMBAT
 ## Features:
 ##  - Over-the-shoulder camera via SpringArmPivot (Node3D) + SpringArm3D + Camera3D
@@ -46,6 +50,27 @@ var _walk_blend_pos: Vector2 = Vector2(0, 1)
 @export var walk_blend_smoothing: float = 14.0 # higher = snappier response; 9 still smooths left<->right reversals without snapping
 @export var walk_blend_smoothing_idle: float = 20.0 # faster when leaving idle to avoid sluggish first step
 @export var walk_direct_xfade: float = 0.22 # direct AnimationPlayer crossfade for 8-way Walk (left<->right) — longer = no snap
+
+@export_group("Footsteps (Procedural)")
+@export var footstep_stride_slow: float = 0.9 # meters between footsteps when moving slower than ~50% of walk_speed (creep/shuffle cadence)
+@export var footstep_stride_walk: float = 1.3 # meters between footsteps at walk_speed (~1.6 steps/s, matches Walk anim loop)
+@export var footstep_stride_run: float = 1.7 # meters between footsteps at run_speed (~3 steps/s, matches running anim ~2 footfalls/loop)
+@export var footstep_stride_dash: float = 1.4 # meters between footsteps at dash burst (~6.7 steps/s for the 0.22s burst)
+@export var footstep_slow_speed_threshold: float = 0.5 # ratio of walk_speed below which we use footstep_stride_slow (creep cadence)
+@export var footstep_min_speed: float = 0.6 # below this horizontal speed, no footsteps
+@export var footstep_volume_walk_db: float = -13.0 # base volume at walk (was -18, bumped +5 dB — was too quiet/dull)
+@export var footstep_volume_run_db: float = -9.0 # base volume at run (was -14)
+@export var footstep_volume_dash_db: float = -7.0 # base volume at dash (was -12)
+@export var footstep_volume_jitter_db: float = 1.5 # ± random dB per step (avoid identical repeats)
+@export var footstep_pitch_walk: float = 1.0 # pitch at walk_speed (kept at 1.0 — pitch shifts dull short transients)
+@export var footstep_pitch_run: float = 1.0 # pitch at run_speed (kept at 1.0 for crispness)
+@export var footstep_pitch_dash: float = 1.06 # pitch at dash_speed (small lift)
+@export var footstep_pitch_jitter: float = 0.02 # ± random pitch per step (minimal — random pitch on short transients makes them sound dull)
+@export var footstep_bus: StringName = &"Master"
+@export var footstep_max_distance: float = 32.0 # AudioStreamPlayer3D max_distance (was 18 -> 24, now 32 — less distant attenuation)
+@export var footstep_unit_size: float = 18.0 # AudioStreamPlayer3D unit_size (was 6 -> 10, now 18 — keeps footsteps crisp before rolloff)
+@export var footstep_attenuation_filter_db: float = 0.0 # 0 disables distance low-pass; default -80 muffled footsteps even at 3m (camera distance)
+@export var footstep_play_on_land: bool = true # play one step sound when landing from air
 
 # --- Combo attack (LMB) : Right hook > left punch > Right cross > leg kick ---
 const COMBO_ANIMS: Array[String] = ["punch_hook", "punch_left_simple1", "punch_cross", "kick_spin"]
@@ -118,6 +143,26 @@ var _throw_start_len: float = 0.0
 
 # --- Dash (Ctrl) ---
 var is_dashing: bool = false
+func has_stamina(amount: float) -> bool:
+	return stamina >= amount
+
+func use_stamina(amount: float) -> bool:
+	if stamina < amount:
+		return false
+	stamina = maxf(stamina - amount, 0.0)
+	_stamina_regen_timer = stamina_regen_delay
+	return true
+
+func _update_stamina(delta: float) -> void:
+	if stamina >= max_stamina:
+		_stamina_regen_timer = stamina_regen_delay
+		stamina = max_stamina
+		return
+	if _stamina_regen_timer > 0.0:
+		_stamina_regen_timer -= delta
+		return
+	# Regen
+	stamina = minf(stamina + stamina_regen_per_sec * delta, max_stamina)
 var dash_timer: float = 0.0
 var dash_recovery_timer: float = 0.0
 var dash_direction: Vector3 = Vector3.ZERO
@@ -152,6 +197,13 @@ var _prev_fall_velocity: float = 0.0
 var _jump_anim_timer: float = 0.0
 var _land_anim_timer: float = 0.0
 
+# --- Footsteps (procedural) ---
+var _footstep_distance: float = 0.0 # accumulated horizontal distance since last step
+var _footstep_player: AudioStreamPlayer3D = null
+var _footstep_last_index: int = -1 # avoid playing the same sample twice in a row
+var _footstep_land_played: bool = false # latch so a landing triggers one step at most
+var _footstep_prev_on_floor: bool = true # last-frame on_floor, used to detect landings
+
 @export_group("Rotation Modes")
 @export var sprint_rotation_speed: float = 22.0
 @export var strafe_rotation_speed: float = 32.0
@@ -170,6 +222,18 @@ var _last_turn_cam_yaw: float = 0.0
 var _turn_reference_initialized: bool = false
 @export_group("Aiming")
 @export var aim_snap_angle: float = 45.0 # degrees cone around crosshair that auto-locks punches while aiming
+
+@export_group("Stamina")
+@export var max_stamina: float = 100.0
+@export var stamina_dash: float = 25.0
+@export var stamina_punch: float = 8.0
+@export var stamina_kick: float = 14.0
+@export var stamina_run_drain_per_sec: float = 8.0
+@export var stamina_regen_per_sec: float = 18.0
+@export var stamina_regen_delay: float = 0.45
+
+var stamina: float = 100.0
+var _stamina_regen_timer: float = 0.0
 
 @export_group("Combat Feel")
 @export var attack_lunge_decay: float = 8.0
@@ -216,6 +280,7 @@ var cloak: WearableItem = null
 func _ready() -> void:
 	add_to_group("player")
 	add_to_group("fighter")
+	stamina = max_stamina
 	_setup_c11_if_present()
 	_setup_combat_nodes()
 	# Connect health signals
@@ -226,6 +291,7 @@ func _ready() -> void:
 	_setup_grabber()
 	_setup_wearables()
 	_setup_hand_hold()
+	_setup_footsteps()
 
 func _setup_combat_nodes() -> void:
 	# --- Health ---
@@ -368,6 +434,137 @@ func _setup_hand_hold() -> void:
 	if inventory and inventory.has_signal("held_item_changed"):
 		if not inventory.held_item_changed.is_connected(_on_held_item_changed):
 			inventory.held_item_changed.connect(_on_held_item_changed)
+
+func _setup_footsteps() -> void:
+	if _footstep_player and is_instance_valid(_footstep_player):
+		return
+	_footstep_player = AudioStreamPlayer3D.new()
+	_footstep_player.name = "FootstepPlayer"
+	_footstep_player.max_distance = footstep_max_distance
+	_footstep_player.unit_size = footstep_unit_size
+	_footstep_player.bus = footstep_bus
+	_footstep_player.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+	_footstep_player.pitch_scale = 1.0
+	# FIX muffled: Godot's default distance low-pass (cutoff 5000 Hz, -80 dB at max_distance)
+	# muffles even the local player's steps at ~3m camera distance. Disable it for crisp transients.
+	_footstep_player.attenuation_filter_db = footstep_attenuation_filter_db
+	_footstep_player.attenuation_filter_cutoff_hz = 20500.0
+	_footstep_player.doppler_tracking = AudioStreamPlayer3D.DOPPLER_TRACKING_DISABLED
+	_footstep_player.emission_angle_enabled = false
+	_footstep_player.max_db = 3.0
+	# Position at the feet (a little below the origin so it sounds grounded)
+	_footstep_player.position = Vector3(0, 0.08, 0)
+	add_child(_footstep_player)
+	print("[Footsteps] Procedural footstep audio ready (samples=%d, bus=%s)" % [FOOTSTEP_STREAMS.size(), String(footstep_bus)])
+
+# --- Procedural footstep system ---
+# Accumulates horizontal distance traveled and fires a randomly-pitched AudioStreamPlayer3D
+# whenever the stride threshold is reached. Stride shortens as speed grows so a sprint
+# produces noticeably faster cadence than a walk.
+func _update_footsteps(delta: float) -> void:
+	if _footstep_player == null:
+		return
+	# Keep inspector tweaks live (unit_size/max_distance/filter were the muffle culprits)
+	if _footstep_player.max_distance != footstep_max_distance:
+		_footstep_player.max_distance = footstep_max_distance
+	if _footstep_player.unit_size != footstep_unit_size:
+		_footstep_player.unit_size = footstep_unit_size
+	if _footstep_player.attenuation_filter_db != footstep_attenuation_filter_db:
+		_footstep_player.attenuation_filter_db = footstep_attenuation_filter_db
+	var on_floor_now: bool = is_on_floor()
+	var just_landed: bool = on_floor_now and not _footstep_prev_on_floor
+	_footstep_prev_on_floor = on_floor_now
+	if not on_floor_now:
+		_footstep_land_played = false
+		_footstep_distance = 0.0
+		return
+	# Suppress footsteps when the body isn't actually moving the character (attacks, ragdoll, mid-pickup freeze, stunned).
+	var blocked: bool = false
+	if ragdoll and ragdoll.is_ragdolled():
+		blocked = true
+	if health and health.is_dead:
+		blocked = true
+	if _is_charging_throw:
+		blocked = true
+	if is_attacking and _is_fullbody_action and not is_dashing:
+		# full-body attack (kick/turn) — feet stay planted, skip
+		blocked = true
+	var horiz_speed: float = Vector2(velocity.x, velocity.z).length()
+	# Landing: just touched the ground while moving horizontally — one soft step
+	if footstep_play_on_land and not _footstep_land_played and just_landed and horiz_speed > 1.0:
+		_footstep_land_played = true
+		var land_speed_norm: float = clampf(horiz_speed / run_speed, 0.4, 1.5)
+		_play_footstep(land_speed_norm, true)
+		_footstep_distance = 0.0
+		return
+	_footstep_land_played = true
+	if blocked:
+		_footstep_distance = 0.0
+		return
+	if horiz_speed < footstep_min_speed:
+		_footstep_distance = 0.0
+		return
+	# Accumulate horizontal distance (frame-rate independent)
+	_footstep_distance += horiz_speed * delta
+	# Decide stride: shorter (more steps) the faster we go
+	var stride: float = footstep_stride_walk
+	var speed_norm: float = 0.0
+	if is_dashing:
+		stride = footstep_stride_dash
+		speed_norm = clampf(horiz_speed / dash_speed, 0.0, 1.5)
+	elif horiz_speed >= run_speed * 0.95 and Input.is_action_pressed("run"):
+		stride = footstep_stride_run
+		speed_norm = clampf(horiz_speed / run_speed, 0.0, 1.5)
+	else:
+		# Three-zone stride ramp: slow -> walk -> run, all monotonically decreasing so cadence
+		# never sounds sparser as the player speeds up.
+		var slow_thresh: float = walk_speed * footstep_slow_speed_threshold
+		if horiz_speed <= slow_thresh:
+			stride = footstep_stride_slow
+		elif horiz_speed <= walk_speed:
+			# slow (slow_thresh) -> walk (walk_speed)
+			var t1: float = (horiz_speed - slow_thresh) / maxf(walk_speed - slow_thresh, 0.01)
+			var hi1: float = maxf(footstep_stride_slow, footstep_stride_walk)
+			var lo1: float = minf(footstep_stride_slow, footstep_stride_walk)
+			stride = lerpf(hi1, lo1, t1)
+		else:
+			# walk (walk_speed) -> run (run_speed)
+			var t2: float = clampf((horiz_speed - walk_speed) / maxf(run_speed - walk_speed, 0.01), 0.0, 1.0)
+			var hi2: float = maxf(footstep_stride_walk, footstep_stride_run)
+			var lo2: float = minf(footstep_stride_walk, footstep_stride_run)
+			stride = lerpf(hi2, lo2, t2)
+		speed_norm = clampf(horiz_speed / run_speed, 0.0, 1.0)
+	if _footstep_distance >= stride:
+		_footstep_distance = 0.0
+		_play_footstep(speed_norm, false)
+
+func _play_footstep(speed_norm: float, is_landing: bool) -> void:
+	if _footstep_player == null or FOOTSTEP_STREAMS.is_empty():
+		return
+	# Pick a random sample — never the same one twice in a row
+	var idx: int = randi() % FOOTSTEP_STREAMS.size()
+	if FOOTSTEP_STREAMS.size() > 1 and idx == _footstep_last_index:
+		idx = (idx + 1) % FOOTSTEP_STREAMS.size()
+	_footstep_last_index = idx
+	_footstep_player.stream = FOOTSTEP_STREAMS[idx]
+	# Pitch: very small jitter only — random pitch on short concrete SFX makes them sound dull/muffled.
+	# Slight bump on dash (sprint cadence = crisper) and slight drop on landing (heavier).
+	var base_pitch: float = 1.0
+	if is_dashing:
+		base_pitch = footstep_pitch_dash
+	if is_landing:
+		base_pitch *= 0.94
+	_footstep_player.pitch_scale = clampf(base_pitch + randf_range(-footstep_pitch_jitter, footstep_pitch_jitter), 0.85, 1.25)
+	# Volume: walk->run->dash ramp + jitter, with a small extra weight on landings
+	var base_vol: float = lerpf(footstep_volume_walk_db, footstep_volume_run_db, clampf(speed_norm, 0.0, 1.0))
+	if is_dashing:
+		base_vol = lerpf(base_vol, footstep_volume_dash_db, clampf((speed_norm - 0.8) / 0.4, 0.0, 1.0))
+	if is_landing:
+		base_vol += 2.0
+	_footstep_player.volume_db = base_vol + randf_range(-footstep_volume_jitter_db, footstep_volume_jitter_db)
+	# Play without stop+play (which causes a click/pop that reads as a muffle).
+	# Each step sample is ~0.2s and footstep cadence is >=0.3s, so re-trigger is safe.
+	_footstep_player.play()
 
 func _on_held_item_changed(item: ItemData) -> void:
 	# Sync from Inventory signal — if null we already detached via drop, else attach
@@ -1517,6 +1714,9 @@ func _play_attack(idx: int) -> void:
 	_has_hit_this_swing = false
 	_hit_confirm_timer = 0.0
 	_hitbox_active = false
+	# Stamina cost — kick costs more than punches
+	var atk_cost: float = stamina_kick if idx == 3 else stamina_punch
+	use_stamina(atk_cost)
 	# total duration approx — punches use COMBO_SPEED (2.7), kick uses KICK_SPEED (1.35)
 	var spd: float = COMBO_SPEED if idx < 3 else KICK_SPEED
 	var len: float = c11_ap.get_animation(anim).length / spd
@@ -2054,6 +2254,13 @@ func _do_hurt_flash(is_crit: bool) -> void:
 func _try_attack() -> void:
 	if _is_charging_throw:
 		return # block combo while charging throw
+	# Stamina gate — kick (idx 3) costs more
+	if not has_stamina(stamina_kick):
+		print("[Combo] guard: not enough stamina for kick")
+		return
+	if not has_stamina(stamina_punch):
+		print("[Combo] guard: not enough stamina for punch")
+		return
 	# If holding usable, redirect to ITEMUSE instead of combo
 	if is_holding_item():
 		if held_item and held_item.is_usable:
@@ -2416,6 +2623,9 @@ func _try_dash() -> bool:
 	if Input.is_action_pressed("run"):
 		print("[Dash] guard: sprinting")
 		return false
+	if not has_stamina(stamina_dash):
+		print("[Dash] guard: not enough stamina (%.0f/%.0f)" % [stamina, stamina_dash])
+		return false
 	var has_dodge: bool = c11_ap.has_animation("Dodge_forward")
 	print("[Dash] has Dodge_forward: %s" % has_dodge)
 	# Decide direction: dominant input axis, else camera forward
@@ -2437,6 +2647,7 @@ func _try_dash() -> bool:
 	dash_timer = dash_duration
 	dash_recovery_timer = dash_duration + dash_recovery
 	is_dashing = true
+	use_stamina(stamina_dash)
 	# Pick directional dash anim based on dominant axis (4 cardinal)
 	var anim: String = _pick_dash_anim(dir)
 	dash_anim_speed = dash_anim_speed_scale
@@ -2601,14 +2812,6 @@ func _unhandled_input(event: InputEvent) -> void:
 		# KEY_QUOTELEFT is the ` key, KEY_ASCIITILDE is ~ (shift+`), also check unicode 96 (`) and 126 (~)
 		if event.keycode == KEY_QUOTELEFT or event.keycode == KEY_ASCIITILDE or event.physical_keycode == 96 or event.unicode == 96 or event.unicode == 126:
 			_toggle_hitbox_debug()
-			get_viewport().set_input_as_handled()
-			return
-		# Toggle cloak with C
-		if event.keycode == KEY_C:
-			if _is_action_blocked_when_holding("cloak"):
-				print("[HandHold] Cloak toggle blocked while holding")
-			else:
-				toggle_cloak()
 			get_viewport().set_input_as_handled()
 			return
 		# Grab ragdoll / Pick up item with F (grab takes priority) — when holding usable, F triggers USE
@@ -2945,6 +3148,10 @@ func _physics_process(delta: float) -> void:
 	# In layered mode, allow sprint/walk while upper punch is active (only block for fullbody kick)
 	var block_sprint := is_attacking and (_is_fullbody_action or not use_layered_anims)
 	var is_sprinting: bool = Input.is_action_pressed("run") and not block_sprint and _stun_timer <= 0.0 and not is_aiming
+	# ---- Stamina: drain while sprinting on the ground with movement input ----
+	if is_sprinting and not is_attacking and is_on_floor() and move_direction.length() > 0.1:
+		use_stamina(stamina_run_drain_per_sec * delta)
+	_update_stamina(delta)
 	var grab_slow: float = 0.68 if (grabber and grabber.is_grabbing()) else 1.0
 	if is_sprinting:
 		speed = run_speed * grab_slow
@@ -3165,6 +3372,7 @@ func _physics_process(delta: float) -> void:
 		_land_anim_timer -= delta
 	apply_floor_snap()
 	move_and_slide()
+	_update_footsteps(delta)
 	animate(delta)
 
 func _get_slow_walk_anim() -> String:

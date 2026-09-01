@@ -14,11 +14,18 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 
 [application]
 
-config/name="Third Person Controller New"
+config/name="project_SUPA"
 config/tags=PackedStringArray("templates")
 run/main_scene="uid://cshu3tu2u3i7a"
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"
+
+[audio]
+
+driver/output_latency=0
+driver/output_latency.web=0
+driver/mix_rate=48000
+driver/mix_rate.web=48000
 
 [dotnet]
 
@@ -26,7 +33,7 @@ project/assembly_name="Third Person Controller New"
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/godot_mcp/plugin.cfg")
+enabled=PackedStringArray("res://addons/better_godot_mcp/plugin.cfg", "res://addons/godot_mcp/plugin.cfg")
 
 [input]
 

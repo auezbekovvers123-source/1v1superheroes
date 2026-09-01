@@ -93,13 +93,32 @@ func set_equipped(item: ItemData) -> void:
 func clear_equipped() -> void:
 	equipped_item = null
 
-## Per-frame visual state machine. drag_item/dragging_from_socket describe the
-## active cross-surface drag (null when idle); InventoryUI supplies screen data.
-func update_state(delta: float, mouse: Vector2, drag_item: ItemData, dragging_from_socket: bool) -> void:
+## Per-frame visual state machine. drag_item/drag_source describe the
+## active world-socket drag (null when idle); InventoryUI supplies screen data.
+## drag_source is the EquipSocket3D the drag started from, or null if none.
+func update_state(delta: float, mouse: Vector2, drag_item: ItemData, drag_source) -> void:
 	var hover := visible_on_screen and mouse.distance_to(screen_position) <= maxf(screen_radius * 1.3, 26.0)
-	var valid_target := (drag_item != null and not dragging_from_socket
-			and slot == drag_item.slot and slot != ItemData.EquipSlot.HAND
-			and not (equipped_item != null and equipped_item == drag_item))
+	# Support legacy bool (old call passes bool) — treat true as "dragging" without source info
+	var drag_source_sock: EquipSocket3D = null
+	var is_dragging := false
+	if drag_source is EquipSocket3D:
+		drag_source_sock = drag_source as EquipSocket3D
+		is_dragging = drag_item != null
+	elif drag_source is bool:
+		is_dragging = (drag_source as bool) and drag_item != null
+
+	var valid_target := false
+	if is_dragging and drag_source_sock != null and drag_source_sock != self:
+		if drag_source_sock.slot == ItemData.EquipSlot.HAND and slot == drag_item.slot and slot != ItemData.EquipSlot.HAND:
+			# HAND -> equip ring (equip)
+			valid_target = true
+		elif drag_source_sock.slot != ItemData.EquipSlot.HAND and slot == ItemData.EquipSlot.HAND:
+			# equip ring -> HAND (unequip)
+			valid_target = true
+	elif is_dragging and drag_source_sock == null and drag_item != null:
+		# Fallback for old tray->ring drag (kept for compat if called without source)
+		if slot == drag_item.slot and slot != ItemData.EquipSlot.HAND and not (equipped_item != null and equipped_item == drag_item):
+			valid_target = true
 
 	var target_fill := 0.0
 	var target_glow := 0.0
@@ -119,8 +138,8 @@ func update_state(delta: float, mouse: Vector2, drag_item: ItemData, dragging_fr
 		if hover:
 			target_pulse = 1.0
 			_pulse_time += delta * 6.0
-	elif drag_item != null and not dragging_from_socket:
-		# Something is being dragged from the tray — dim the non-targets
+	elif is_dragging:
+		# Something is being dragged between world sockets — dim the non-targets
 		target_alpha = 0.15
 
 	if hover and equipped_item != null and drag_item == null:

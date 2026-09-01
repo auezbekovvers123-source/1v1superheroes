@@ -13,6 +13,9 @@ signal health_changed(current: float, max_val: float)
 @export var auto_regen: bool = false
 @export var regen_per_second: float = 5.0
 
+const PUNCH_HIT_SOUND: AudioStream = preload("res://Assets/Sounds/Punch/Punch.mp3")
+const KICK_HIT_SOUND: AudioStream = preload("res://Assets/Sounds/Punch/Kick.mp3")
+
 var current: float = 100.0
 var is_dead: bool = false
 var _invuln_timer: float = 0.0
@@ -65,6 +68,10 @@ func take_damage(amount: float, from: Node = null, knockback: Vector3 = Vector3.
 	if current <= 0.0 and can_die and not is_dead:
 		is_dead = true
 		died.emit(from)
+		# Play hit feedback FIRST so the killing-blow impact reads on audio. Then run death
+		# effects (ragdoll, respawn, particles). Spawned AudioStreamPlayer3D is added to the
+		# scene tree so it survives the death sequence.
+		_spawn_hit_feedback(amount, from, is_crit)
 		_do_death_effect(from)
 	else:
 		_spawn_hit_feedback(amount, from, is_crit)
@@ -82,12 +89,23 @@ func heal(amount: float) -> void:
 func _do_hitstop(duration: float) -> void:
 	if duration <= 0.0:
 		return
-	# Use Engine.time_scale hitstop — also pause physics briefly via timer
-	var prev_scale := Engine.time_scale
-	Engine.time_scale = 0.02
-	# Unscaled timer via SceneTree
+	# Freeze gameplay time WITHOUT freezing the audio mix. Using Engine.time_scale pauses
+	# audio globally, which makes hit sounds play slow/muffled. Instead we use
+	# physics_jitter_fix on a freeze-like trick: cancel velocity-driven motion in the
+	# victim by setting their velocity to zero, then use a real-time timer to wait.
+	var body: CharacterBody3D = _owner_body
+	if body == null:
+		return
+	var saved_vel: Vector3 = body.velocity
+	body.velocity = Vector3.ZERO
+	# Also brief attacker-stuck visual: small lunge freeze via meta (read by Player._physics_process)
+	if body.has_meta("hit_confirm"):
+		body.set_meta("hitstop_remaining", duration)
 	await Engine.get_main_loop().create_timer(duration, true, false, true).timeout
-	Engine.time_scale = prev_scale
+	if is_instance_valid(body):
+		body.velocity = saved_vel * 0.4 # return with damping, not full snap-back
+		if body.has_meta("hitstop_remaining"):
+			body.remove_meta("hitstop_remaining")
 
 func _do_flash(is_crit: bool) -> void:
 	var body = get_parent()
@@ -168,7 +186,7 @@ func _spawn_hit_feedback(amount: float, from: Node, is_crit: bool) -> void:
 	mat.spread = 45.0
 	mat.initial_velocity_min = 4.0
 	mat.initial_velocity_max = 9.0 if not is_crit else 14.0
-	mat.gravity = Vector3(0, -18, 0)
+	mat.gravity = Vector3(0, -18.0, 0)
 	mat.scale_min = 0.08
 	mat.scale_max = 0.18
 	var quad = QuadMesh.new()
@@ -191,44 +209,59 @@ func _spawn_hit_feedback(amount: float, from: Node, is_crit: bool) -> void:
 	var t := body.get_tree().create_timer(1.0)
 	t.timeout.connect(func(): if is_instance_valid(particles): particles.queue_free())
 	# Screen shake on owner? handled by attacker
-	# Hit sound procedural: short click via AudioStreamWAV
-	_play_hit_sound(body, amount, is_crit)
+	# Hit sound: pick Punch.mp3 vs Kick.mp3 based on attacker's current attack anim.
+	_play_hit_sound(body, amount, is_crit, from)
 
-func _play_hit_sound(at: Node3D, amount: float, is_crit: bool) -> void:
+func _is_kick_attack(from: Node) -> bool:
+	if from == null:
+		return false
+	# 1) Prefer the attacker's currently-playing upper anim (most reliable signal at hit moment)
+	if "c11_current_anim" in from:
+		var anim_name: String = String(from.get("c11_current_anim"))
+		if anim_name != "":
+			var lower: String = anim_name.to_lower()
+			if "kick" in lower:
+				return true
+			# Throws/dashes aren't melee — fall through to combo_index check
+	# 2) Fallback: combo_index 3 == kick_spin
+	if "combo_index" in from:
+		var idx: int = int(from.get("combo_index"))
+		if idx >= 3:
+			return true
+	return false
+
+func _play_hit_sound(at: Node3D, amount: float, is_crit: bool, from: Node = null) -> void:
 	var player := AudioStreamPlayer3D.new()
-	player.max_distance = 22.0
-	player.unit_size = 8.0
-	# Generate a tiny WAV burst
-	var stream := AudioStreamWAV.new()
-	stream.format = AudioStreamWAV.FORMAT_16_BITS
-	stream.stereo = false
-	stream.mix_rate = 22050
-	var dur := 0.09 if not is_crit else 0.16
-	var samples := int(22050 * dur)
-	var data := PackedByteArray()
-	data.resize(samples * 2)
-	var base_freq := 180.0 if not is_crit else 90.0
-	for i in range(samples):
-		var t: float = float(i) / 22050.0
-		var env: float = exp(-t * 38.0) # decay
-		var freq: float = base_freq * (1.0 + 0.6 * exp(-t * 70.0))
-		var s: float = sin(TAU * freq * t) * env
-		if is_crit:
-			s += 0.35 * sin(TAU * freq * 2.1 * t) * env
-			s *= 0.7
-		# soft clip
-		s = clamp(s, -0.9, 0.9)
-		var iv := int(s * 9000)
-		data[ i*2 ] = iv & 0xFF
-		data[i*2+1] = (iv >> 8) & 0xFF
-	stream.data = data
+	player.max_distance = 32.0
+	player.unit_size = 18.0
+	player.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+	player.attenuation_filter_db = 0.0
+	player.attenuation_filter_cutoff_hz = 20500.0
+	player.doppler_tracking = AudioStreamPlayer3D.DOPPLER_TRACKING_DISABLED
+	var use_kick: bool = _is_kick_attack(from)
+	var stream: AudioStream = KICK_HIT_SOUND if use_kick else PUNCH_HIT_SOUND
 	player.stream = stream
-	player.pitch_scale = randf_range(0.92, 1.08)
-	player.volume_db = -6.0 + (amount / 22.0) * 4.0
+	# NO pitch jitter — randomizing pitch on short transients shifts frequency content and
+	# makes the punch sound dull/muffled. Play at native rate for maximum impact/crispness.
+	player.pitch_scale = 1.0
+	# Volume scales lightly with damage; crits a bit louder; kicks a bit heavier
+	var base_db: float = -4.0
+	if use_kick:
+		base_db = -2.0
+	if is_crit:
+		base_db += 2.0
+	base_db += (clampf(amount, 0.0, 30.0) / 22.0) * 3.0
+	player.volume_db = base_db
 	at.get_tree().current_scene.add_child(player)
 	player.global_position = at.global_position + Vector3(0, 1.0, 0)
 	player.play()
-	var tl := at.get_tree().create_timer(dur + 0.2)
+	# Free after the stream length + a small tail (use the actual stream length if available)
+	var dur: float = 0.5
+	if stream is AudioStreamMP3:
+		dur = (stream as AudioStreamMP3).get_length()
+	elif stream is AudioStreamWAV:
+		dur = (stream as AudioStreamWAV).get_length()
+	var tl := at.get_tree().create_timer(dur + 0.25)
 	tl.timeout.connect(func(): if is_instance_valid(player): player.queue_free())
 
 func _do_death_effect(_killer: Node) -> void:
