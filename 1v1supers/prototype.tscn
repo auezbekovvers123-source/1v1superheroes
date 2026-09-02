@@ -15,3 +15,6 @@ visible = false
 
 [node name="Dummy3" parent="." index="8"]
 visible = false
+
+[node name="CityTest" parent="." index="13"]
+transform = Transform3D(5, 0, 0, 0, 5, 0, 0, 0, 5, 25.154556, 0, 40.508965)

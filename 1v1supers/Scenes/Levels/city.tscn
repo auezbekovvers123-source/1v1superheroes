@@ -1,0 +1,59 @@
+[gd_scene format=3 uid="uid://cyln0u1dridns"]
+
+[ext_resource type="Script" uid="uid://8mstg3uc6bmo" path="res://Scripts/City/CityGenerator.gd" id="1_citygen"]
+[ext_resource type="PackedScene" uid="uid://cr2ersq7g6q6f" path="res://Scenes/Characters/player.tscn" id="2_player"]
+[ext_resource type="PackedScene" path="res://Scenes/Characters/Dummy.tscn" id="3_dummy"]
+[ext_resource type="Texture2D" uid="uid://doyodkg1ds7td" path="res://Assets/Textures/Sky.png" id="4_sky"]
+[ext_resource type="Script" uid="uid://bsxjp8bvtw5ud" path="res://Scripts/UI/CombatHUD.gd" id="5_hud"]
+[ext_resource type="Script" uid="uid://cvrriw8ux7hm" path="res://Scripts/UI/InventoryUI.gd" id="6_inv"]
+
+[sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_city"]
+panorama = ExtResource("4_sky")
+
+[sub_resource type="Sky" id="Sky_city"]
+sky_material = SubResource("PanoramaSkyMaterial_city")
+
+[sub_resource type="Environment" id="Environment_city"]
+background_mode = 2
+sky = SubResource("Sky_city")
+tonemap_mode = 3
+glow_enabled = true
+
+[node name="CityLevel" type="Node3D" unique_id=1736494556]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1679387301]
+environment = SubResource("Environment_city")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=658980288]
+transform = Transform3D(-0.866026, -0.433013, 0.249999, 0.5, -0.75, 0.433012, -1.3411e-07, 0.499999, 0.866026, 0, 8, 0)
+shadow_enabled = true
+directional_shadow_split_1 = 0.07
+directional_shadow_split_2 = 0.12
+directional_shadow_split_3 = 0.2
+directional_shadow_blend_splits = true
+
+[node name="Player" parent="." unique_id=942105226 instance=ExtResource("2_player")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 1, 2)
+
+[node name="Dummy" parent="." unique_id=59609858 instance=ExtResource("3_dummy")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 0.92, 8)
+
+[node name="Dummy2" parent="." unique_id=887467811 instance=ExtResource("3_dummy")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 14, 0.92, 10)
+
+[node name="CombatHUD" type="CanvasLayer" parent="." unique_id=1929876082]
+script = ExtResource("5_hud")
+
+[node name="InventoryUI" type="CanvasLayer" parent="." unique_id=1557794083]
+script = ExtResource("6_inv")
+
+[node name="CityTest" type="Node3D" parent="." unique_id=184266017 groups=["city_test"]]
+transform = Transform3D(5, 0, 0, 0, 5, 0, 0, 0, 5, 1.5865135, 0, 2.6977654)
+script = ExtResource("1_citygen")
+
+[node name="Label3D_CityHint" type="Label3D" parent="CityTest" unique_id=856890233]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 16, 5, -5)
+modulate = Color(0.8, 1, 0.8, 1)
+text = "CityTest (Grid City Maker) - toggle visibility in editor"
+font_size = 48
+outline_size = 8

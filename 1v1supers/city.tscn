@@ -1,0 +1,69 @@
+[gd_scene format=3 uid="uid://4f3uwmd6v66"]
+
+[ext_resource type="Script" path="res://Scripts/City/CityGenerator.gd" id="1_citygen"]
+[ext_resource type="PackedScene" path="res://Scenes/Characters/player.tscn" id="2_player"]
+[ext_resource type="PackedScene" path="res://Scenes/Characters/Dummy.tscn" id="3_dummy"]
+[ext_resource type="Texture2D" uid="uid://doyodkg1ds7td" path="res://Assets/Textures/Sky.png" id="4_sky"]
+[ext_resource type="Script" path="res://Scripts/UI/CombatHUD.gd" id="5_hud"]
+[ext_resource type="Script" path="res://Scripts/UI/InventoryUI.gd" id="6_inv"]
+
+[sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_city"]
+panorama = ExtResource("4_sky")
+
+[sub_resource type="Sky" id="Sky_city"]
+sky_material = SubResource("PanoramaSkyMaterial_city")
+
+[sub_resource type="Environment" id="Environment_city"]
+background_mode = 2
+sky = SubResource("Sky_city")
+tonemap_mode = 3
+glow_enabled = true
+
+[node name="CityLevel" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_city")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(-0.866026, -0.433013, 0.249999, 0.5, -0.75, 0.433012, -1.3411e-07, 0.499999, 0.866026, 0, 8, 0)
+shadow_enabled = true
+directional_shadow_split_1 = 0.07
+directional_shadow_split_2 = 0.12
+directional_shadow_split_3 = 0.2
+directional_shadow_blend_splits = true
+
+# City is generated here – isolated from prototype.tscn (main testing space).
+# To tweak: select CityGenerator node > Inspector > Grid / Lanes / Buildings / Decor.
+[node name="CityGenerator" type="Node3D" parent="."]
+script = ExtResource("1_citygen")
+grid_size_tiles = Vector2i(22, 22)
+tile_size = Vector3(2, 0, 2)
+lanes_x = 2
+lanes_y = 2
+lane_width = 1
+building_min_size_tiles = Vector2i(1, 1)
+building_max_size_tiles = Vector2i(2, 2)
+building_spacing_tiles = 1
+building_road_gap_tiles = 0
+building_density_multiplier = 1.4
+orient_buildings_to_road = true
+decor_density = 0.35
+decor_spacing_tiles = 1
+height_offset = 0.01
+auto_generate_on_ready = true
+city_offset = Vector3(0, 0, 0)
+
+[node name="Player" parent="." instance=ExtResource("2_player")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 1.0, 2)
+
+[node name="Dummy" parent="." instance=ExtResource("3_dummy")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 0.92, 8)
+
+[node name="Dummy2" parent="." instance=ExtResource("3_dummy")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 14, 0.92, 10)
+
+[node name="CombatHUD" type="CanvasLayer" parent="."]
+script = ExtResource("5_hud")
+
+[node name="InventoryUI" type="CanvasLayer" parent="."]
+script = ExtResource("6_inv")
