@@ -127,3 +127,44 @@ func list_equipped() -> Dictionary:
 func unequip_all() -> void:
 	for slot in _slots.keys():
 		unequip_slot(slot)
+
+# ---------------- Powers (generic worn-item abilities) ----------------
+# A power is granted when a visible, equipped wearable reports get_power_id().
+# Cape reports "fly". Future items (helmet/boots/...) report their own ids.
+func get_power_source(power_id: String) -> WearableItem:
+	for slot in _slots.keys():
+		var item: WearableItem = _slots[slot] as WearableItem
+		if item == null or not is_instance_valid(item):
+			continue
+		if not item.visible:
+			continue
+		if item.has_method("get_power_id") and String(item.call("get_power_id")) == power_id:
+			return item
+	return null
+
+func has_power(power_id: String) -> bool:
+	return get_power_source(power_id) != null
+
+func get_all_powers() -> Array[String]:
+	var out: Array[String] = []
+	for slot in _slots.keys():
+		var item: WearableItem = _slots[slot] as WearableItem
+		if item == null or not is_instance_valid(item):
+			continue
+		if not item.visible:
+			continue
+		if item.has_method("get_power_id"):
+			var pid: String = String(item.call("get_power_id"))
+			if pid != "" and not out.has(pid):
+				out.append(pid)
+	return out
+
+func activate_power(power_id: String, player: Node) -> bool:
+	var src := get_power_source(power_id)
+	if src == null:
+		return false
+	if src.has_method("can_activate_power") and not bool(src.call("can_activate_power", player)):
+		return false
+	if src.has_method("activate_power"):
+		return bool(src.call("activate_power", player))
+	return false

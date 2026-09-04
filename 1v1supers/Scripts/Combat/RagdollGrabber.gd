@@ -33,6 +33,16 @@ class_name RagdollGrabber
 @export var formation_max_speed: float = 7.0
 @export var formation_max_dist: float = 2.6 # farther than this -> ignore (body trails naturally)
 
+# --- Carrier collision (held body vs player capsule) ---
+# When true (default), held PhysicalBones KEEP colliding with the carrier's
+# CharacterBody3D capsule so the corpse drapes/slides on the player instead of
+# clipping straight through the mesh. Previously the grabber added blanket
+# collision exceptions carrier<->bones which is exactly what caused the clip-through.
+@export var collide_with_carrier: bool = true
+@export var carrier_separation_margin: float = 0.08 # extra gap beyond capsule+bone radii (covers visual mesh > physics shape)
+@export var carrier_separation_push: float = 8.0 # velocity push strength when a held bone penetrates the carrier capsule
+@export var carrier_separation_max_corr: float = 0.12 # max positional depenetration per physics frame (m)
+
 var _carrier: CharacterBody3D = null
 var _skeleton: Skeleton3D = null
 var _hand_attachment: BoneAttachment3D = null
@@ -81,6 +91,12 @@ func _physics_process(delta: float) -> void:
 			return
 		# Keep grabbed bone awake; joint + formation spring do the pulling
 		_update_grab_spring(delta)
+		# Physical interaction with the carrier: physics collision does most of
+		# the work, but CharacterBody vs RigidBody contacts + small physics
+		# shapes (vs bigger visual meshes) still allow visual overlap on fast
+		# turns — actively push held bones out of the carrier capsule.
+		if collide_with_carrier:
+			_enforce_carrier_separation(delta)
 		# Safety: only drop if the pinned bone is STILL far from the hand well after
 		# the reel-in should have connected (grace 1.2s, and 8m so a flying corpse
 		# being reeled in doesn't instantly cancel the grab).
@@ -167,6 +183,156 @@ func _update_grab_spring(delta: float) -> void:
 		# Horizontal bias: dragging should slide/trail, not float
 		desired2.y *= 0.6
 		pb.linear_velocity = pb.linear_velocity.lerp(desired2, clamp(delta * 10.0, 0.0, 1.0))
+		pb.can_sleep = false
+
+func _ensure_carrier_collision() -> void:
+	# Guarantee physical interaction between carrier capsule and held bones.
+	# 1) Remove any stale carrier<->bone exceptions (old saves / previous logic).
+	# 2) Force bones onto layer/mask 1 so they collide with the carrier (layer 1).
+	if _carrier == null:
+		return
+	var carrier_body := _carrier as PhysicsBody3D
+	for b in _grabbed_bones:
+		if not is_instance_valid(b):
+			continue
+		if carrier_body:
+			carrier_body.remove_collision_exception_with(b)
+		if _hand_anchor and is_instance_valid(_hand_anchor):
+			_hand_anchor.remove_collision_exception_with(b)
+		# Bones must share a layer with the carrier to generate contacts.
+		if b.collision_layer == 0:
+			b.collision_layer = 1
+		if b.collision_mask == 0:
+			b.collision_mask = 1
+		else:
+			# Ensure the carrier's layer bit is included in the bone mask.
+			b.collision_mask = b.collision_mask | (_carrier.collision_layer if _carrier.collision_layer != 0 else 1)
+	for fb in _formation_bones:
+		if not is_instance_valid(fb):
+			continue
+		if carrier_body:
+			carrier_body.remove_collision_exception_with(fb)
+		if fb.collision_layer == 0:
+			fb.collision_layer = 1
+		if fb.collision_mask == 0:
+			fb.collision_mask = 1
+		else:
+			fb.collision_mask = fb.collision_mask | (_carrier.collision_layer if _carrier.collision_layer != 0 else 1)
+	# Also make sure the carrier itself still collides on layer 1 (ragdoll
+	# code zeroes it while the CARRIER is ragdolled — but we never grab then).
+	if _carrier.collision_layer == 0:
+		_carrier.collision_layer = 1
+	if _carrier.collision_mask == 0:
+		_carrier.collision_mask = 1
+
+func _get_carrier_capsule() -> Dictionary:
+	# Returns {center: Vector3, radius: float, half_height: float} describing the
+	# carrier's vertical capsule segment in world space. Falls back to a
+	# default humanoid capsule when no CollisionShape3D is found.
+	var fallback_center := Vector3.ZERO
+	if _carrier != null and is_instance_valid(_carrier):
+		fallback_center = (_carrier as Node3D).global_position + Vector3(0, 0.92, 0)
+	var fallback := {
+		"center": fallback_center,
+		"radius": 0.30,
+		"half_height": 0.62,
+	}
+	if _carrier == null or not is_instance_valid(_carrier):
+		return fallback
+	var cs := _carrier.get_node_or_null("CollisionShape3D") as CollisionShape3D
+	if cs == null or cs.shape == null or not (cs.shape is CapsuleShape3D):
+		return fallback
+	var cap := cs.shape as CapsuleShape3D
+	var center: Vector3 = (cs as Node3D).global_position
+	# Capsule total height includes caps; cylinder half-extent.
+	# NOTE: use local scale (carrier is never non-uniformly scaled in practice).
+	var sy: float = (cs as Node3D).scale.y
+	var sx: float = (cs as Node3D).scale.x
+	var half_height: float = maxf((cap.height * 0.5 - cap.radius) * sy, 0.05)
+	return {"center": center, "radius": cap.radius * sx, "half_height": half_height}
+
+func _estimate_bone_radius(pb: PhysicalBone3D) -> float:
+	if pb == null or not is_instance_valid(pb):
+		return 0.12
+	for child in pb.get_children():
+		if child is CollisionShape3D:
+			var cs := child as CollisionShape3D
+			if cs.shape == null:
+				continue
+			if cs.shape is SphereShape3D:
+				return (cs.shape as SphereShape3D).radius
+			if cs.shape is CapsuleShape3D:
+				return (cs.shape as CapsuleShape3D).radius
+			if cs.shape is BoxShape3D:
+				var sz: Vector3 = (cs.shape as BoxShape3D).size
+				return minf(minf(sz.x, sz.y), sz.z) * 0.5
+	return 0.12
+
+func _enforce_carrier_separation(delta: float) -> void:
+	# Soft depenetration: push every held bone out of the carrier's capsule so
+	# the corpse visibly drapes/slides on the player instead of sinking into
+	# the chest/legs. Physics contacts handle the hard constraint; this covers
+	# solver slop + the fact that visual meshes are fatter than bone shapes.
+	if _carrier == null or not is_instance_valid(_carrier):
+		return
+	if _grabbed_bones.is_empty() and _formation_bones.is_empty():
+		return
+	var cap := _get_carrier_capsule()
+	var center: Vector3 = cap["center"]
+	var radius: float = cap["radius"]
+	var half_height: float = cap["half_height"]
+	var hand_pos: Vector3 = _get_hand_world_pos()
+	var all_bones: Array = []
+	all_bones.append_array(_grabbed_bones)
+	all_bones.append_array(_formation_bones)
+	var seen: Dictionary = {}
+	for pb_raw in all_bones:
+		var pb := pb_raw as PhysicalBone3D
+		if pb == null or not is_instance_valid(pb):
+			continue
+		var id := pb.get_instance_id()
+		if seen.has(id):
+			continue
+		seen[id] = true
+		var is_pinned: bool = pb in _grabbed_bones
+		# The pinned neck lives AT the hand (outside the capsule by design).
+		# Skip separation while it is glued to the hand so we never fight the
+		# PinJoint — contact alone keeps it honest if the hand dips inward.
+		if is_pinned and _hand_anchor and is_instance_valid(_hand_anchor):
+			if pb.global_position.distance_to(hand_pos) < 0.22:
+				continue
+		var bone_pos: Vector3 = pb.global_position
+		# Closest point on the capsule's vertical segment to the bone.
+		var seg_y: float = clampf(bone_pos.y, center.y - half_height, center.y + half_height)
+		var closest := Vector3(center.x, seg_y, center.z)
+		var diff: Vector3 = bone_pos - closest
+		var dist: float = diff.length()
+		var bone_r: float = _estimate_bone_radius(pb)
+		var min_dist: float = radius + bone_r + carrier_separation_margin
+		if dist >= min_dist or dist < 0.0001:
+			continue
+		var push_dir: Vector3 = diff / maxf(dist, 0.0001)
+		# If bone is dead-center inside the capsule (degenerate), push it toward the hand side.
+		if dist < 0.02:
+			var to_hand: Vector3 = hand_pos - closest
+			to_hand.y = 0.0
+			if to_hand.length() > 0.05:
+				push_dir = to_hand.normalized()
+			else:
+				push_dir = Vector3.FORWARD
+		var penetration: float = min_dist - dist
+		# Positional correction (clamped, frame-rate independent-ish).
+		var corr: float = minf(penetration, carrier_separation_max_corr)
+		pb.global_position += push_dir * corr
+		# Velocity push so the solver carries the separation instead of snapping back.
+		var push_vel: Vector3 = push_dir * (penetration * carrier_separation_push)
+		# Don't launch the body: clamp the added push and damp inward velocity.
+		if push_vel.length() > 4.0:
+			push_vel = push_vel.normalized() * 4.0
+		var inward: float = -pb.linear_velocity.dot(push_dir)
+		if inward > 0.0:
+			pb.linear_velocity += push_dir * inward * minf(delta * 12.0, 1.0)
+		pb.linear_velocity += push_vel * minf(delta * 6.0, 1.0)
 		pb.can_sleep = false
 
 func _get_hand_world_basis() -> Basis:
@@ -334,12 +500,12 @@ func try_grab_nearest() -> bool:
 	_grabbed_body.set_meta("is_being_grabbed", true)
 	_grabbed_body.set_meta("grabbed_by", _carrier)
 
-	# Don't let the carrier's own capsule snag on ANY held bone while carrying
-	if _carrier is PhysicsBody3D:
-		for pb in _grabbed_bones:
-			(_carrier as PhysicsBody3D).add_collision_exception_with(pb)
-		for fb in _formation_bones:
-			(_carrier as PhysicsBody3D).add_collision_exception_with(fb)
+	# Held body MUST collide with the carrier capsule — otherwise it clips
+	# straight through the player mesh. So: clear any stale exceptions and
+	# force the bones onto a layer/mask that interacts with the carrier.
+	# (The joint still does the dragging; contact only resolves penetration,
+	# and the carrier's kinematic mass wins so the player is never blocked.)
+	_ensure_carrier_collision()
 
 	# Also set on carrier for HUD/debug
 	_carrier.set_meta("is_grabbing", true)

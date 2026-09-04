@@ -27,6 +27,15 @@ enum EquipSlot { NONE, CAPE, HELMET, ARMOR, BOOTS, ACCESSORY, HAND }
 @export var hold_rotation_deg: Vector3 = Vector3(0, 0, 0)
 @export var hold_scale: Vector3 = Vector3.ONE
 
+# --- Powers (worn-item abilities, activated with R / "power" action) ---
+# Generic so future items (helmet, boots, ...) can declare their own power.
+# Cape uses power_id = "fly".
+@export var power_id: String = ""
+@export var power_name: String = ""
+
+func has_power() -> bool:
+	return power_id != ""
+
 func is_wearable() -> bool:
 	return type == ItemType.WEARABLE
 

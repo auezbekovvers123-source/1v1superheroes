@@ -143,6 +143,27 @@ func set_wind(strength: float, speed: float) -> void:
 		_mat.set_shader_parameter("strength", strength)
 		_mat.set_shader_parameter("speed", speed)
 
+# --- Power: cape grants "fly" (activated with R while airborne) ---
+func get_power_id() -> String:
+	return "fly"
+
+func can_activate_power(player: Node) -> bool:
+	if player == null:
+		return false
+	if player.has_method("can_fly"):
+		return player.call("can_fly")
+	return true
+
+func activate_power(player: Node) -> bool:
+	if player and player.has_method("try_toggle_fly"):
+		player.call("try_toggle_fly")
+		return true
+	return false
+
+func deactivate_power(player: Node) -> void:
+	if player and player.has_method("set_flying") and player.get("is_flying"):
+		player.call("set_flying", false)
+
 func equip(to_skeleton: Skeleton3D, target_bone: String = "") -> bool:
 	var ok: bool = super.equip(to_skeleton, target_bone)
 	if ok:

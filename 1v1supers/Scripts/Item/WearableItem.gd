@@ -83,3 +83,19 @@ func set_color(col: Color) -> void:
 		(mi.material_override as ShaderMaterial).set_shader_parameter("color", col)
 	elif mi and mi.get_surface_override_material(0) is ShaderMaterial:
 		(mi.get_surface_override_material(0) as ShaderMaterial).set_shader_parameter("color", col)
+
+# ---------------- Powers (generic worn-item abilities) ----------------
+# ItemData.power_id declares the power (e.g. cape -> "fly").
+# Wearables override get_power_id() when the power differs from item_id mapping.
+# Player.gd polls Equipment.has_power() and calls activate/deactivate via the owner.
+func get_power_id() -> String:
+	return ""
+
+func can_activate_power(_player: Node) -> bool:
+	return true
+
+func activate_power(_player: Node) -> bool:
+	return false
+
+func deactivate_power(_player: Node) -> void:
+	pass

@@ -258,7 +258,8 @@ func _physics_process(delta: float):
 		if aiming:
 			target_fov = aim_fov
 		elif change_fov_on_run and owner and owner is CharacterBody3D and (owner as CharacterBody3D).is_on_floor():
-			if Input.is_action_pressed("run") and (owner as CharacterBody3D).velocity.length() > 0.6 and not (owner as CharacterBody3D).get("is_attacking"):
+			var owner_carrying: bool = owner.has_method("is_carrying_body") and bool(owner.call("is_carrying_body"))
+			if Input.is_action_pressed("run") and (owner as CharacterBody3D).velocity.length() > 0.6 and not (owner as CharacterBody3D).get("is_attacking") and not owner_carrying:
 				target_fov = run_fov
 		target_fov += _fov_kick
 		# During attack, slight FOV tighten on windup then kick on hit is via _fov_kick

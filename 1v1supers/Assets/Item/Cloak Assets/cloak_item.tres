@@ -9,8 +9,10 @@
 script = ExtResource("1_data")
 id = "cloak_01"
 display_name = "Hero Cloak"
-description = "A flowing hero cloak with wind simulation. Pick up into HAND first, then drag & drop onto the CAPE slot (upper back) in the inventory (TAB)."
+description = "A flowing hero cloak with wind simulation. Pick up into HAND first, then drag & drop onto the CAPE slot (upper back) in the inventory (TAB). Worn power (R, mid-air): FLY."
 scene = ExtResource("2_scene")
 mesh = ExtResource("3_mesh")
 material = ExtResource("4_mat")
 is_holdable = true
+power_id = "fly"
+power_name = "Fly"

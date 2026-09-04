@@ -128,6 +128,8 @@ var _is_using_item: bool = false
 var _use_timer: float = 0.0
 var _hold_attach_tween: Tween = null
 var _hand_bone_name: String = "hand.r"
+# --- Ragdoll carry (GTA-style): reuses HOLD_ANIM while pinning a ragdolled enemy ---
+var _is_carrying_body: bool = false
 
 # --- Throw Charge (physics) ---
 var _is_charging_throw: bool = false
@@ -208,6 +210,14 @@ var _footstep_prev_on_floor: bool = true # last-frame on_floor, used to detect l
 @export var sprint_rotation_speed: float = 22.0
 @export var strafe_rotation_speed: float = 32.0
 @export var instant_strafe_lock: bool = false
+@export_group("Smoothing (Exponential Decay)")
+@export var ground_accel_rate: float = 12.0 # exp rate toward target velocity on ground (was fixed 0.28 lerp — snappy + fps-dependent)
+@export var air_accel_rate: float = 4.0 # exp rate toward target velocity in air (was fixed 0.16 lerp)
+@export var dash_enter_rate: float = 20.0 # exp rate into dash burst (was instant assignment)
+@export var dash_recovery_rate: float = 10.0 # exp rate from dash burst back to locomotion (was fixed 0.18 lerp)
+@export var attack_stop_rate: float = 10.0 # exp rate toward zero while fullbody-attacking (was *= 0.42 per-frame snap)
+@export var stun_stop_rate: float = 8.0 # exp rate toward zero while stunned (was *= 0.22 per-frame snap)
+@export var snap_turn_rate: float = 16.0 # exp rate for combat snap-to-target (was instant atan2 assignment)
 @export_group("Turn In Place (Camera Threshold)")
 @export var turn_threshold_deg: float = 90.0
 @export var turn_enabled: bool = true
@@ -276,6 +286,41 @@ var cloak: WearableItem = null
 @export var auto_equip_cloak: bool = false
 @export var cloak_bone: String = "spine_03.x"
 @export var cloak_color: Color = Color(0.78, 0.12, 0.12, 1)
+
+@export_group("Flight (Cape Power)")
+@export var fly_cruise_speed: float = 6.0 # horizontal speed while flying (no sprint)
+@export var fly_sprint_speed: float = 11.0 # horizontal speed while sprint-flying (Shift)
+@export var fly_vertical_speed: float = 4.0 # Space up / C down speed
+@export var fly_vertical_sprint_mult: float = 1.5 # vertical boost while sprinting
+@export var fly_accel: float = 8.0 # lerp rate toward target velocity
+@export var fly_tilt_deg: float = 80.0 # Mesh pitch forward while sprint-flying (superman)
+@export var fly_cruise_lean_deg: float = 14.0 # slight slant toward movement while cruise-flying (no sprint)
+@export var fly_sprint_vertical_slant_deg: float = 30.0 # nose-up on climb / nose-down on dive while sprint-flying
+@export var fly_tilt_speed: float = 5.0 # lerp rate for tilt/lean
+@export var fly_anim_blend: float = 0.3 # OneShot fade / direct crossfade for fly enter/exit
+@export var fly_anim_blend_speed: float = 3.0 # lerp rate for fly_1 <-> fly_2 Blend2 (higher = snappier)
+const FLY_IDLE_ANIM: String = "fly_1"
+const FLY_MOVE_ANIM: String = "fly_2"
+var is_flying: bool = false
+var _fly_tilt_x: float = 0.0
+var _fly_roll_z: float = 0.0
+var _fly_tilt_tween: Tween = null
+var _fly_blend: float = 0.0 # 0 = pure fly_1 (hover/cruise), 1 = pure fly_2 (sprint)
+
+# --- Exponential-decay smoothing helpers (framerate-independent, no snapping) ---
+# Weight w = 1 - exp(-rate * delta): always in [0, 1] range, reaches ~63% in 1/rate sec.
+# Replaces fixed lerp weights (0.28 / 0.18 / ...) and raw rate*delta products
+# (which overshoot above 1 at low fps and snap at high fps).
+func _exp_weight(rate: float, delta: float) -> float:
+	return 1.0 - exp(-rate * delta)
+
+func _smooth_mesh_yaw(target_yaw: float, rate: float, delta: float) -> void:
+	if player_mesh == null:
+		return
+	player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, target_yaw, _exp_weight(rate, delta))
+
+func _smooth_vel_axis(current: float, target: float, rate: float, delta: float) -> float:
+	return lerpf(current, target, _exp_weight(rate, delta))
 
 func _ready() -> void:
 	add_to_group("player")
@@ -420,6 +465,10 @@ func _setup_wearables() -> void:
 	if inventory and inventory.has_signal("held_item_changed"):
 		if not inventory.held_item_changed.is_connected(_on_held_item_changed):
 			inventory.held_item_changed.connect(_on_held_item_changed)
+	# Powers: losing the cape mid-flight forces a fall
+	if equipment and equipment.has_signal("item_unequipped"):
+		if not equipment.item_unequipped.is_connected(_on_equipment_unequipped):
+			equipment.item_unequipped.connect(_on_equipment_unequipped)
 	# If inventory already has held item (scene reload), sync
 	if inventory and inventory.has_method("get_held_item"):
 		var existing_held = inventory.get_held_item()
@@ -649,6 +698,292 @@ func toggle_cloak() -> void:
 	else:
 		_try_equip_cloak()
 
+# ============================================================
+# Powers (generic worn-item abilities) + Cape Flight ("fly")
+# R ("power" action) toggles flight when the CAPE slot grants "fly".
+# Air-only toggle: must jump first; landing or losing the cape cancels.
+# fly_1 = hover idle, fly_2 = moving; sprint-fly adds 80deg Mesh pitch.
+# ============================================================
+func has_power(power_id: String) -> bool:
+	if equipment and equipment.has_method("has_power"):
+		return bool(equipment.call("has_power", power_id))
+	return false
+
+func has_cape_power() -> bool:
+	return has_power("fly")
+
+func can_fly() -> bool:
+	if not has_power("fly"):
+		return false
+	if ragdoll and ragdoll.is_ragdolled():
+		return false
+	if health and health.get("is_dead"):
+		return false
+	return true
+
+func try_activate_equipped_power() -> bool:
+	# R button: activate the worn item's power. Only "fly" exists for now;
+	# future powers (helmet/boots/...) branch here by power_id.
+	if has_power("fly"):
+		return try_toggle_fly()
+	print("[Power] No worn-item power to activate (wear the cape for fly)")
+	return false
+
+func try_toggle_fly() -> bool:
+	if is_flying:
+		set_flying(false)
+		return true
+	if is_on_floor():
+		print("[Fly] Must be airborne to fly (jump first, then R)")
+		return false
+	if not can_fly():
+		print("[Fly] Cape power not equipped (wear cape in CAPE slot)")
+		return false
+	set_flying(true)
+	return true
+
+func set_flying(active: bool) -> void:
+	if active == is_flying:
+		return
+	if active:
+		if not can_fly():
+			return
+		# Cancel conflicting states so flight starts clean
+		if _is_charging_throw:
+			_cancel_throw_charge()
+		if is_dashing:
+			is_dashing = false
+			dash_timer = 0.0
+		if _is_turning:
+			_cancel_turn()
+		is_flying = true
+		snap_vector = Vector3.ZERO
+		velocity.y = minf(velocity.y, 1.0)
+		if _fly_tilt_tween and _fly_tilt_tween.is_valid():
+			_fly_tilt_tween.kill()
+			_fly_tilt_tween = null
+		_enter_fly_visual()
+		print("[Fly] ON (cape power)")
+	else:
+		is_flying = false
+		_exit_fly_visual()
+		snap_vector = Vector3.DOWN
+		print("[Fly] OFF")
+
+func _on_equipment_unequipped(slot: int, _item: WearableItem) -> void:
+	# Smart cancel: losing the cape mid-air forces a fall.
+	if is_flying and (slot == ItemData.EquipSlot.CAPE or not has_power("fly")):
+		print("[Fly] Cape lost mid-air — falling")
+		set_flying(false)
+
+func _ensure_fly_blend_nodes() -> bool:
+	# Builds FlyIdle (fly_1) / FlyMove (fly_2) / FlyBlend (Blend2) once and
+	# routes UpperScale -> FlyBlend so sprint cross-blends without restarting.
+	if animator == null or animator.tree_root == null:
+		return false
+	var tree = animator.tree_root as AnimationNodeBlendTree
+	if tree == null:
+		return false
+	if c11_ap == null or not c11_ap.has_animation(FLY_IDLE_ANIM) or not c11_ap.has_animation(FLY_MOVE_ANIM):
+		push_warning("[Fly] Missing anim '%s' or '%s'" % [FLY_IDLE_ANIM, FLY_MOVE_ANIM])
+		return false
+	if not tree.has_node("FlyIdle"):
+		var idle_anim := AnimationNodeAnimation.new()
+		idle_anim.animation = StringName(FLY_IDLE_ANIM)
+		tree.add_node("FlyIdle", idle_anim, Vector2(180, 110))
+	if not tree.has_node("FlyMove"):
+		var move_anim := AnimationNodeAnimation.new()
+		move_anim.animation = StringName(FLY_MOVE_ANIM)
+		tree.add_node("FlyMove", move_anim, Vector2(180, 190))
+	if not tree.has_node("FlyBlend"):
+		var blend := AnimationNodeBlend2.new()
+		tree.add_node("FlyBlend", blend, Vector2(380, 150))
+	else:
+		# Keep anim names in sync in case constants change
+		(tree.get_node("FlyIdle") as AnimationNodeAnimation).animation = StringName(FLY_IDLE_ANIM)
+		(tree.get_node("FlyMove") as AnimationNodeAnimation).animation = StringName(FLY_MOVE_ANIM)
+	# Route: UpperScale input 0 <- FlyBlend <- FlyIdle/FlyMove
+	tree.disconnect_node("UpperScale", 0)
+	tree.disconnect_node("FlyBlend", 0)
+	tree.disconnect_node("FlyBlend", 1)
+	tree.connect_node("FlyBlend", 0, "FlyIdle")
+	tree.connect_node("FlyBlend", 1, "FlyMove")
+	tree.connect_node("UpperScale", 0, "FlyBlend")
+	return true
+
+func _restore_upper_action_route() -> void:
+	if animator == null or animator.tree_root == null:
+		return
+	var tree = animator.tree_root as AnimationNodeBlendTree
+	if tree == null or not tree.has_node("UpperAction"):
+		return
+	tree.disconnect_node("UpperScale", 0)
+	tree.connect_node("UpperScale", 0, "UpperAction")
+
+func _enter_fly_visual() -> void:
+	if c11_ap == null or not c11_ap.has_animation(FLY_IDLE_ANIM):
+		push_warning("[Fly] Missing anim '%s'" % FLY_IDLE_ANIM)
+		return
+	_fly_blend = 0.0
+	if use_layered_anims and animator and animator.active:
+		if not _ensure_fly_blend_nodes():
+			return
+		animator.set("parameters/FlyBlend/blend_amount", 0.0)
+		animator.set("parameters/UpperScale/scale", 1.0)
+		var upper_node = animator.tree_root.get_node("UpperOneShot") as AnimationNodeOneShot
+		if upper_node:
+			upper_node.filter_enabled = false # full-body override
+			upper_node.fadein_time = fly_anim_blend
+			upper_node.fadeout_time = 0.3
+		animator.set("parameters/UpperOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_FIRE)
+		_upper_action_active = true
+		_is_fullbody_action = true
+		c11_current_anim = FLY_IDLE_ANIM
+	else:
+		_play_c11(FLY_IDLE_ANIM, fly_anim_blend, 1.0)
+
+func _update_fly_anim(sprint_active: bool, delta: float) -> void:
+	# Cruise/hover (no sprint) stays pure fly_1; sprint cross-blends to fly_2.
+	if c11_ap == null:
+		return
+	var target_blend: float = 1.0 if sprint_active else 0.0
+	if c11_ap.has_animation(FLY_MOVE_ANIM) == false:
+		target_blend = 0.0
+	if use_layered_anims and animator and animator.active:
+		_fly_blend = lerpf(_fly_blend, target_blend, _exp_weight(fly_anim_blend_speed, delta))
+		if abs(_fly_blend - target_blend) < 0.002:
+			_fly_blend = target_blend
+		animator.set("parameters/FlyBlend/blend_amount", _fly_blend)
+		# Track nearest end for debug/guards; the OneShot stays fired throughout.
+		c11_current_anim = FLY_MOVE_ANIM if _fly_blend > 0.5 else FLY_IDLE_ANIM
+		_upper_action_active = true
+		_is_fullbody_action = true
+	else:
+		var target: String = FLY_MOVE_ANIM if sprint_active else FLY_IDLE_ANIM
+		if c11_current_anim == target:
+			return
+		_play_c11(target, fly_anim_blend, 1.0)
+
+func _exit_fly_visual() -> void:
+	if use_layered_anims and animator and animator.active:
+		animator.set("parameters/UpperOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_FADE_OUT)
+		var upper_node = animator.tree_root.get_node("UpperOneShot") as AnimationNodeOneShot
+		if upper_node:
+			upper_node.filter_enabled = true
+			upper_node.fadein_time = 0.08
+			upper_node.fadeout_time = 0.14
+		_restore_upper_action_route()
+		animator.set("parameters/UpperScale/scale", 1.0)
+		_fly_blend = 0.0
+		_upper_action_active = false
+		_is_fullbody_action = false
+		c11_current_anim = ""
+	else:
+		if c11_ap and c11_current_anim in [FLY_IDLE_ANIM, FLY_MOVE_ANIM]:
+			if c11_ap.has_animation("Idle"):
+				_play_c11("Idle", 0.25, 1.0)
+			c11_current_anim = ""
+	# Ease Mesh pitch/roll back upright without touching yaw
+	if player_mesh:
+		if _fly_tilt_tween and _fly_tilt_tween.is_valid():
+			_fly_tilt_tween.kill()
+		_fly_tilt_tween = create_tween()
+		_fly_tilt_tween.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		_fly_tilt_tween.set_parallel(true)
+		_fly_tilt_tween.tween_property(player_mesh, "rotation:x", 0.0, 0.3)
+		_fly_tilt_tween.tween_property(player_mesh, "rotation:z", 0.0, 0.3)
+		_fly_tilt_tween.set_parallel(false)
+		_fly_tilt_tween.tween_callback(func(): _fly_tilt_x = 0.0; _fly_roll_z = 0.0)
+
+func _is_fly_down_pressed() -> bool:
+	if InputMap.has_action("fly_down") and Input.is_action_pressed("fly_down"):
+		return true
+	if Input.is_key_pressed(KEY_C) or Input.is_physical_key_pressed(KEY_C):
+		return true
+	if Input.is_key_pressed(67) or Input.is_physical_key_pressed(67):
+		return true
+	return false
+
+func _update_flight(delta: float) -> void:
+	# Camera-relative horizontal + Space up / C down. Shift = sprint (fly_2 + 80deg tilt).
+	var ui_open := _inventory_ui_open()
+	var raw := Vector3.ZERO
+	if not ui_open:
+		raw.x = Input.get_action_strength("move_right") - Input.get_action_strength("move_left")
+		raw.z = Input.get_action_strength("move_backwards") - Input.get_action_strength("move_forwards")
+	if raw.length() > 1.0:
+		raw = raw.normalized()
+	var yaw: float = spring_arm_pivot.rotation.y if spring_arm_pivot else 0.0
+	var horiz: Vector3 = raw.rotated(Vector3.UP, yaw)
+	var up := false
+	var down := false
+	if not ui_open:
+		up = Input.is_action_pressed("jump")
+		down = _is_fly_down_pressed()
+	var sprinting: bool = Input.is_action_pressed("run") and not ui_open and not is_aiming
+	var h_speed: float = fly_sprint_speed if sprinting else fly_cruise_speed
+	var v_speed: float = fly_vertical_speed * (fly_vertical_sprint_mult if sprinting else 1.0)
+	var target_vel: Vector3 = horiz * h_speed
+	target_vel.y = (v_speed if up else 0.0) + (-v_speed if down else 0.0)
+	velocity.x = _smooth_vel_axis(velocity.x, target_vel.x, fly_accel, delta)
+	velocity.z = _smooth_vel_axis(velocity.z, target_vel.z, fly_accel, delta)
+	velocity.y = _smooth_vel_axis(velocity.y, target_vel.y, fly_accel * 1.2, delta)
+	snap_vector = Vector3.ZERO
+	apply_floor_snap()
+	move_and_slide()
+	# Landed -> smart cancel (touchdown ends flight)
+	if is_on_floor():
+		was_on_floor = true
+		_prev_fall_velocity = 0.0
+		_footstep_prev_on_floor = true
+		set_flying(false)
+		return
+	was_on_floor = false
+	_prev_fall_velocity = velocity.y
+	_footstep_prev_on_floor = false
+	# Yaw: sprint-fly faces travel dir (superman); hover keeps strafe-lock on camera
+	if player_mesh and spring_arm_pivot:
+		const YAW_OFFSET: float = PI
+		var moving_h: bool = horiz.length() > 0.12
+		if sprinting and moving_h:
+			var target_yaw: float = atan2(horiz.x, horiz.z)
+			_smooth_mesh_yaw(target_yaw, sprint_rotation_speed, delta)
+		else:
+			var cam_yaw: float = spring_arm_pivot.rotation.y + YAW_OFFSET
+			_smooth_mesh_yaw(cam_yaw, strafe_rotation_speed, delta)
+		# Pitch/roll: superman 80deg while sprint-moving, else a slight
+		# directional slant (pitch toward forward/back input, bank toward strafe).
+		# raw is camera-space and hover is strafe-locked, so raw maps to lean:
+		# W (raw.z=-1) pitches forward, D (raw.x=+1) banks right.
+		# Note: the character's right is -X of the Mesh basis (it faces +Z),
+		# so banking right needs positive rotation.z.
+		var moving_any: bool = moving_h or up or down
+		var target_tilt: float = 0.0
+		var target_roll: float = 0.0
+		if sprinting and moving_any:
+			# Superman base pose, modulated by vertical: climb raises the
+			# nose, dive drops it.
+			target_tilt = deg_to_rad(fly_tilt_deg)
+			if up and not down:
+				target_tilt -= deg_to_rad(fly_sprint_vertical_slant_deg)
+			elif down and not up:
+				target_tilt += deg_to_rad(fly_sprint_vertical_slant_deg)
+		elif moving_any:
+			var lean: float = deg_to_rad(fly_cruise_lean_deg)
+			target_tilt = -raw.z * lean
+			if up and not down:
+				target_tilt -= lean # climb slants back
+			elif down and not up:
+				target_tilt += lean # dive slants forward
+			target_roll = raw.x * lean
+		_fly_tilt_x = lerpf(_fly_tilt_x, target_tilt, _exp_weight(fly_tilt_speed, delta))
+		_fly_roll_z = lerpf(_fly_roll_z, target_roll, _exp_weight(fly_tilt_speed, delta))
+		player_mesh.rotation.x = _fly_tilt_x
+		player_mesh.rotation.z = _fly_roll_z
+	# Anim: fly_1 for hover AND normal cruise; fly_2 only while sprinting (blended).
+	var sprint_anim_active: bool = sprinting and (horiz.length() > 0.12 or up or down)
+	_update_fly_anim(sprint_anim_active, delta)
+
 func _setup_c11_if_present() -> void:
 	var c11_node = null
 	var ap: AnimationPlayer = null
@@ -805,6 +1140,10 @@ func _setup_layered_tree(ap: AnimationPlayer) -> void:
 	# If we already hold item from deferred attach, re-enter hold
 	if _is_holding and held_item:
 		_enter_hold_state()
+	elif _is_carrying_body:
+		# Tree was rebuilt (request reset to NONE) — re-fire HOLD pose.
+		_apply_hold_fire("Carry")
+		_is_carrying_body = true
 
 # ============================================================
 # Hand Hold System — single HAND slot, bone-filtered hold loop
@@ -1013,10 +1352,26 @@ func _detach_held_visual() -> void:
 		_hold_attach_tween = null
 
 func _enter_hold_state() -> void:
+	_apply_hold_fire("HandHold")
+	if c11_ap == null or not c11_ap.has_animation(HOLD_ANIM):
+		return
+	_is_holding = true
+
+func _exit_hold_state() -> void:
+	_is_holding = false
+	_is_using_item = false
+	_use_timer = 0.0
+	# Keep HOLD posed while carrying a ragdolled body (shared HoldOneShot layer).
+	if _is_carrying_body:
+		print("[HandHold] HOLD kept (still carrying body)")
+		return
+	_apply_hold_fade_out()
+
+func _apply_hold_fire(reason: String = "HandHold") -> void:
 	if c11_ap == null:
 		return
 	if not c11_ap.has_animation(HOLD_ANIM):
-		push_warning("[HandHold] Missing hold anim '%s', available: %s" % [HOLD_ANIM, str(c11_ap.get_animation_list())])
+		push_warning("[%s] Missing hold anim '%s', available: %s" % [reason, HOLD_ANIM, str(c11_ap.get_animation_list())])
 		return
 	if use_layered_anims and animator and animator.active:
 		var hold_anim_node = animator.tree_root.get_node("HoldAction") as AnimationNodeAnimation
@@ -1029,13 +1384,12 @@ func _enter_hold_state() -> void:
 			hold_node.fadeout_time = 0.22
 			hold_node.filter_enabled = true
 		animator.set("parameters/HoldOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_FIRE)
-		print("[HandHold] HOLD OneShot fired: %s (filtered upper, loops)" % HOLD_ANIM)
+		print("[%s] HOLD OneShot fired: %s (filtered upper, loops)" % [reason, HOLD_ANIM])
 	else:
 		# Direct mode fallback: just play hold
 		_play_c11(HOLD_ANIM, 0.25, 1.0)
-	_is_holding = true
 
-func _exit_hold_state() -> void:
+func _apply_hold_fade_out() -> void:
 	if use_layered_anims and animator and animator.active:
 		animator.set("parameters/HoldOneShot/request", AnimationNodeOneShot.ONE_SHOT_REQUEST_FADE_OUT)
 		print("[HandHold] HOLD faded out")
@@ -1043,9 +1397,45 @@ func _exit_hold_state() -> void:
 		if c11_ap and c11_ap.current_animation == HOLD_ANIM:
 			if c11_ap.has_animation("Idle"):
 				_play_c11("Idle", 0.2)
-	_is_holding = false
-	_is_using_item = false
-	_use_timer = 0.0
+
+# ============================================================
+# Ragdoll Carry Hold — same UpperBody_ITEMHOLD pose while pinning a body.
+# Independent from item _is_holding so combat stays allowed while carrying.
+# ============================================================
+func _enter_carry_hold_state() -> void:
+	if _is_carrying_body:
+		return
+	_is_carrying_body = true
+	_apply_hold_fire("Carry")
+
+func _exit_carry_hold_state() -> void:
+	if not _is_carrying_body:
+		return
+	_is_carrying_body = false
+	# Keep HOLD posed if an item is still held in HAND.
+	if is_holding_item():
+		print("[Carry] HOLD kept (still holding item)")
+		return
+	_apply_hold_fade_out()
+	print("[Carry] HOLD faded out (body released)")
+
+func is_carrying_body() -> bool:
+	if _is_carrying_body:
+		return true
+	if grabber != null and grabber.is_grabbing():
+		return true
+	return false
+
+func _sync_carry_hold_state() -> void:
+	if grabber == null:
+		if _is_carrying_body:
+			_exit_carry_hold_state()
+		return
+	var grabbing: bool = grabber.is_grabbing()
+	if grabbing and not _is_carrying_body:
+		_enter_carry_hold_state()
+	elif not grabbing and _is_carrying_body:
+		_exit_carry_hold_state()
 
 func drop_held_item() -> bool:
 	if not _is_holding or held_item == null:
@@ -1377,6 +1767,8 @@ func _spawn_thrown_item(data: ItemData, power: float) -> void:
 		spring_arm_pivot.kick_fov(power * 3.0)
 
 func _start_throw_charge() -> bool:
+	if is_flying:
+		return false # throw charge blocked while flying
 	if not is_holding_item():
 		return false
 	if _is_charging_throw:
@@ -1435,7 +1827,7 @@ func _update_throw_charge(delta: float) -> void:
 			var target: float = clampf(shake_intensity * 0.95, 0.0, 1.0)
 			# Use direct assignment for immediate feedback, lerp for smoothness
 			var cur: float = spring_arm_pivot.get("trauma") if "trauma" in spring_arm_pivot else 0.0
-			var new_trauma: float = lerpf(cur, target, clampf(delta * 14.0, 0.0, 1.0))
+			var new_trauma: float = lerpf(cur, target, _exp_weight(14.0, delta))
 			# Also ensure monotonic increase while charging (don't let decay drop below target)
 			if new_trauma < target * 0.85:
 				new_trauma = target * 0.85
@@ -1795,9 +2187,14 @@ func _aim_dir_from_point(point: Vector3) -> Vector3:
 		return cam_dir
 	return dir
 
-func _snap_to_target(aim_dir: Vector3) -> void:
+func _snap_to_target(aim_dir: Vector3, delta: float = -1.0) -> void:
 	if player_mesh == null:
 		return
+	# Smooth (no directional snap): exponential lerp_angle toward the aim/target
+	# yaw instead of an instant atan2 assignment. Falls back to the current
+	# physics delta when called outside _physics_process (e.g. attack start).
+	if delta < 0.0:
+		delta = get_physics_process_delta_time()
 	if aim_dir.length() < 0.1:
 		aim_dir = _compute_aim_dir()
 	var best: Node3D = null
@@ -1837,14 +2234,14 @@ func _snap_to_target(aim_dir: Vector3) -> void:
 			best_dist = dist
 			best = body
 	# Face the aim point by default so punches go where the crosshair points;
-	# if an enemy sits near the crosshair, snap dead-center onto it so hits never whiff.
+	# if an enemy sits near the crosshair, ease dead-center onto it so hits never whiff.
 	var face_dir: Vector3 = aim_dir
 	if best:
 		var dir: Vector3 = best.global_position - global_position
 		dir.y = 0
 		if dir.length() >= 0.01:
 			face_dir = dir.normalized()
-	player_mesh.rotation.y = atan2(face_dir.x, face_dir.z)
+	_smooth_mesh_yaw(atan2(face_dir.x, face_dir.z), snap_turn_rate, delta)
 
 func _get_skeleton() -> Skeleton3D:
 	if _skeleton and is_instance_valid(_skeleton):
@@ -1924,8 +2321,8 @@ func _update_upper_skeleton_look(delta: float, look_dir: Vector3) -> void:
 	var target_yaw: float = atan2(look_dir.x, look_dir.z)
 	var delta_yaw: float = angle_difference(mesh_yaw, target_yaw)
 	delta_yaw = clamp(delta_yaw, deg_to_rad(-65.0), deg_to_rad(65.0))
-	_upper_look_angle = lerp_angle(_upper_look_angle, delta_yaw, delta * 12.0)
-	_upper_look_weight = lerpf(_upper_look_weight, 1.0, delta * 10.0)
+	_upper_look_angle = lerp_angle(_upper_look_angle, delta_yaw, _exp_weight(12.0, delta))
+	_upper_look_weight = lerpf(_upper_look_weight, 1.0, _exp_weight(10.0, delta))
 	var q := Quaternion(Vector3.UP, _upper_look_angle * _upper_look_weight)
 	skel.set_bone_pose_rotation(_spine_bone_idx, q)
 	# also drive neck a bit for head look
@@ -1937,8 +2334,8 @@ func _update_upper_skeleton_look(delta: float, look_dir: Vector3) -> void:
 func _clear_upper_skeleton_look(delta: float) -> void:
 	if _upper_look_weight <= 0.01 and _upper_look_angle == 0.0:
 		return
-	_upper_look_weight = lerpf(_upper_look_weight, 0.0, delta * 12.0)
-	_upper_look_angle = lerp_angle(_upper_look_angle, 0.0, delta * 12.0)
+	_upper_look_weight = lerpf(_upper_look_weight, 0.0, _exp_weight(12.0, delta))
+	_upper_look_angle = lerp_angle(_upper_look_angle, 0.0, _exp_weight(12.0, delta))
 	var skel := _get_skeleton()
 	if skel == null or _spine_bone_idx == -1:
 		return
@@ -2161,6 +2558,7 @@ func _on_died(_killer: Node) -> void:
 	# Drop grabbed body if we die
 	if grabber and grabber.is_grabbing():
 		grabber.release_grab()
+		_exit_carry_hold_state()
 	# --- GTA5 ragdoll ---
 	if ragdoll == null:
 		_setup_ragdoll()
@@ -2202,6 +2600,9 @@ func _respawn_after_death() -> void:
 	# Called by Health after timer — reset ragdoll before teleport
 	if grabber and grabber.is_grabbing():
 		grabber.release_grab()
+		_exit_carry_hold_state()
+	elif _is_carrying_body:
+		_exit_carry_hold_state()
 	if ragdoll and ragdoll.is_ragdolled():
 		ragdoll.reset_ragdoll()
 	global_position = Vector3(0, 2.2, 0)
@@ -2252,6 +2653,8 @@ func _do_hurt_flash(is_crit: bool) -> void:
 	tw2.tween_property(player_mesh, "scale", Vector3.ONE, 0.13)
 
 func _try_attack() -> void:
+	if is_flying:
+		return # attacks blocked while flying (smart cancel spec)
 	if _is_charging_throw:
 		return # block combo while charging throw
 	# Stamina gate — kick (idx 3) costs more
@@ -2314,6 +2717,8 @@ func _try_attack() -> void:
 			combo_queued = true
 
 func _check_camera_turn() -> void:
+	if is_flying:
+		return # no turn-in-place while flying
 	if _inventory_ui_open():
 		return # inventory camera orbit would chain-fire turn anims — hold facing
 	if not turn_enabled:
@@ -2374,11 +2779,16 @@ func _check_camera_turn() -> void:
 						anim = cand
 						break
 		if not c11_ap.has_animation(anim):
-			# no turn anim available - just snap rotation without anim
+			# no turn anim available - ease rotation instead of snapping
 			var step_fallback: float = deg_to_rad(turn_threshold_deg) * dir
-			player_mesh.rotation.y += step_fallback
+			var target_fallback: float = player_mesh.rotation.y + step_fallback
+			if _turn_tween and _turn_tween.is_valid():
+				_turn_tween.kill()
+			_turn_tween = create_tween()
+			_turn_tween.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			_turn_tween.tween_property(player_mesh, "rotation:y", target_fallback, maxf(turn_rotation_duration, 0.05))
 			_turn_cooldown_timer = turn_cooldown
-			print("[Turn] no anim found, snapped %.1f deg" % rad_to_deg(step_fallback))
+			print("[Turn] no anim found, eased %.1f deg" % rad_to_deg(step_fallback))
 			return
 	_trigger_turn(dir, anim)
 
@@ -2516,6 +2926,9 @@ func _bake_turn_skeleton_yaw_into_mesh() -> void:
 
 
 func _on_c11_animation_finished(anim_name: String) -> void:
+	# Fly anims loop while flying — never treat as finished
+	if is_flying and anim_name in [FLY_IDLE_ANIM, FLY_MOVE_ANIM]:
+		return
 	# Handle turn finish - timer handles bake/re-enable; avoid snap by not clearing early
 	if anim_name in ["Turn_left", "Turn_right", "turn_left", "turn_right"]:
 		# If turn was cancelled, flags already cleared; otherwise let timer bake 90deg
@@ -2589,6 +3002,8 @@ func _on_c11_animation_finished(anim_name: String) -> void:
 			_has_hit_this_swing = false
 
 func _try_dash() -> bool:
+	if is_flying:
+		return false # dash blocked while flying
 	if _is_charging_throw:
 		print("[Dash] guard: charging throw")
 		return false
@@ -2780,7 +3195,18 @@ func _inventory_ui_open() -> bool:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if _inventory_ui_open():
-		return # inventory open — ignore gameplay keys (G/Q/C/F/Ctrl/`)
+		return # inventory open — ignore gameplay keys (G/Q/C/F/Ctrl/`/R)
+	# Powers: R activates the worn item's power (cape = fly toggle, air-only)
+	if event is InputEventAction and event.action == "power" and event.pressed and not event.echo:
+		if try_activate_equipped_power():
+			get_viewport().set_input_as_handled()
+			return
+	if event is InputEventKey and event.pressed and not event.echo:
+		var is_r: bool = event.keycode == KEY_R or event.physical_keycode == KEY_R or event.keycode == 82 or event.physical_keycode == 82
+		if is_r:
+			if try_activate_equipped_power():
+				get_viewport().set_input_as_handled()
+			return
 	# Dash on Ctrl. Try multiple keycode paths because Ctrl can come through as either
 	# physical_keycode (4194322 = KEY_LEFT_CTRL) or keycode depending on layout/OS.
 	if event is InputEventKey and event.pressed and not event.echo:
@@ -2865,6 +3291,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			_try_attack()
 
 func _try_grab_or_pickup() -> bool:
+	if is_flying:
+		return false # grab/pickup blocked while flying
 	if _is_charging_throw:
 		print("[Throw] Grab blocked while charging")
 		return false
@@ -2874,12 +3302,14 @@ func _try_grab_or_pickup() -> bool:
 	# If currently grabbing, release first (F toggles)
 	if grabber and grabber.is_grabbing():
 		grabber.release_grab()
+		_exit_carry_hold_state()
 		print("[Player] Released ragdoll")
 		return true
 	# Try grab nearest ragdolled body before item pickup (neck-exact)
 	if grabber:
 		if grabber.try_grab_nearest():
 			print("[Player] Grabbed ragdoll at neck")
+			_enter_carry_hold_state()
 			_play_grab_pickup_anim()
 			return true
 	# Fallback to item pickup
@@ -2922,6 +3352,8 @@ func _play_grab_pickup_anim() -> void:
 						player_mesh.look_at(global_position - dir.normalized(), Vector3.UP)
 
 func _try_interact_pickup() -> bool:
+	if is_flying:
+		return false # pickup blocked while flying
 	if _is_action_blocked_when_holding("pickup"):
 		if is_holding_item():
 			print("[HandHold] Pickup blocked — HAND full with '%s' (drop with G)" % held_item.display_name)
@@ -2934,6 +3366,10 @@ func _try_interact_pickup() -> bool:
 	# Hand full check — block picking another
 	if is_holding_item():
 		print("[HandHold] Cannot pick up — already holding '%s'" % held_item.display_name)
+		return false
+	# Hands busy carrying a ragdolled body — same UpperBody_ITEMHOLD pose, no free hand
+	if grabber and grabber.is_grabbing():
+		print("[Carry] Pickup blocked — hands busy carrying ragdoll (release with F)")
 		return false
 	
 	var best_pickup: Node3D = null
@@ -2997,31 +3433,51 @@ func _try_interact_pickup() -> bool:
 	return true
 
 func _physics_process(delta: float) -> void:
+	# Keep carry HOLD pose in sync with the grabber (covers auto-release:
+	# carrier ragdoll/death, target un-ragdoll, safety drop, freed target).
+	_sync_carry_hold_state()
 	# GTA ragdoll: if ragdolled, skip all player movement/attack logic and let physics bones control collision
 	if ragdoll and ragdoll.is_ragdolled():
 		# Keep velocity zero; physics bones simulate the body. We still need gravity? Ragdoll handles it via PhysicalBones.
 		# Freeze CharacterBody motion so it doesn't slide; ragdoll bones are separate PhysicsBody3Ds
 		velocity = Vector3.ZERO
+		if is_flying:
+			set_flying(false)
 		if _is_charging_throw:
 			_cancel_throw_charge()
 		return
 	if health and health.is_dead:
 		# Dead but not yet ragdolled (fallback) — no movement
+		if is_flying:
+			set_flying(false)
 		if _is_charging_throw:
 			_cancel_throw_charge()
-		velocity.x = lerp(velocity.x, 0.0, delta * 6.0)
-		velocity.z = lerp(velocity.z, 0.0, delta * 6.0)
+		velocity.x = _smooth_vel_axis(velocity.x, 0.0, 6.0, delta)
+		velocity.z = _smooth_vel_axis(velocity.z, 0.0, 6.0, delta)
 		velocity.y -= gravity * delta
 		move_and_slide()
 		return
+	# ---- Flight (cape power): full movement override while airborne ----
+	# Note: R activation lives in _unhandled_input only (single edge-fire).
+	# Polling here would double-toggle with the event handler, so don't poll.
+	if is_flying:
+		if ragdoll and ragdoll.is_ragdolled():
+			set_flying(false)
+		elif not has_power("fly"):
+			print("[Fly] Power lost — falling")
+			set_flying(false)
+		else:
+			_update_stamina(delta)
+			_update_flight(delta)
+			return
 	if is_picking_up:
 		# Layered pick_up is upper-body only (filtered) → allow walking while picking
 		if use_layered_anims and animator and animator.active and not _is_fullbody_action:
 			# Allow slow walk while upper pickup plays — just reduce speed, don't freeze
 			pass
 		else:
-			velocity.x = lerp(velocity.x, 0.0, delta * 14.0)
-			velocity.z = lerp(velocity.z, 0.0, delta * 14.0)
+			velocity.x = _smooth_vel_axis(velocity.x, 0.0, 14.0, delta)
+			velocity.z = _smooth_vel_axis(velocity.z, 0.0, 14.0, delta)
 			if not is_on_floor():
 				velocity.y -= gravity * delta
 			move_and_slide()
@@ -3127,9 +3583,9 @@ func _physics_process(delta: float) -> void:
 		is_attacking = false
 		_upper_action_active = false
 		_is_fullbody_action = false
-	# Lunge decay
+	# Lunge decay — exponential, framerate-independent (was rate*delta lerp)
 	if _lunge_velocity.length() > 0.01:
-		_lunge_velocity = _lunge_velocity.lerp(Vector3.ZERO, attack_lunge_decay * delta)
+		_lunge_velocity = _lunge_velocity.lerp(Vector3.ZERO, _exp_weight(attack_lunge_decay, delta))
 	else:
 		_lunge_velocity = Vector3.ZERO
 	# If stunned, damp inputs
@@ -3145,20 +3601,25 @@ func _physics_process(delta: float) -> void:
 	if spring_arm_pivot:
 		move_direction = move_direction.rotated(Vector3.UP, spring_arm_pivot.rotation.y)
 	# ---- Speed toggle ----
+	# Carrying a ragdolled body locks locomotion to the 8-way walk: the 1-way
+	# "running" clip has no strafe variants, so sprinting with a body mixes it
+	# with the WalkSpace directionals (visible overlap). Run input becomes a
+	# brisk walk (hustle) instead — same walk anims, never the Run clip.
+	var carrying := is_carrying_body()
 	# In layered mode, allow sprint/walk while upper punch is active (only block for fullbody kick)
-	var block_sprint := is_attacking and (_is_fullbody_action or not use_layered_anims)
+	var block_sprint := (is_attacking and (_is_fullbody_action or not use_layered_anims)) or carrying
 	var is_sprinting: bool = Input.is_action_pressed("run") and not block_sprint and _stun_timer <= 0.0 and not is_aiming
 	# ---- Stamina: drain while sprinting on the ground with movement input ----
 	if is_sprinting and not is_attacking and is_on_floor() and move_direction.length() > 0.1:
 		use_stamina(stamina_run_drain_per_sec * delta)
 	_update_stamina(delta)
-	var grab_slow: float = 0.68 if (grabber and grabber.is_grabbing()) else 1.0
+	var grab_slow: float = 0.68 if carrying else 1.0
 	if is_sprinting:
 		speed = run_speed * grab_slow
-		if grabber and grabber.is_grabbing():
-			speed = run_speed * 0.78 # slightly less slow when running with body
 	else:
 		speed = walk_speed * grab_slow
+		if carrying and Input.is_action_pressed("run") and not ui_open and _stun_timer <= 0.0 and not is_aiming:
+			speed = walk_speed # hustle with body: brisk 8-way walk, never the 1-way Run
 	# Slight slow while charging throw (stabilize aim, but still allow walk)
 	if _is_charging_throw:
 		speed *= 0.72
@@ -3182,9 +3643,9 @@ func _physics_process(delta: float) -> void:
 	var target_z := move_direction.z * speed * stun_mult
 	# ---- Dash movement state (overrides locomotion while active) ----
 	if is_dashing:
-		# Lock horizontal velocity to dash direction for the full burst
-		velocity.x = dash_direction.x * dash_speed
-		velocity.z = dash_direction.z * dash_speed
+		# Ease into the dash burst instead of snapping velocity in one frame
+		velocity.x = _smooth_vel_axis(velocity.x, dash_direction.x * dash_speed, dash_enter_rate, delta)
+		velocity.z = _smooth_vel_axis(velocity.z, dash_direction.z * dash_speed, dash_enter_rate, delta)
 		dash_timer -= delta
 		if dash_timer <= 0.0:
 			is_dashing = false
@@ -3196,16 +3657,17 @@ func _physics_process(delta: float) -> void:
 		# Brief slowdown before full control returns — still biased to dash dir
 		var decay: float = clampf(1.0 - (delta / maxf(dash_recovery, 0.001)), 0.0, 1.0)
 		var recovery_speed: float = dash_speed * decay
-		# Blend back to target locomotion
-		velocity.x = lerp(dash_direction.x * recovery_speed, target_x, 0.18)
-		velocity.z = lerp(dash_direction.z * recovery_speed, target_z, 0.18)
+		# Blend back to target locomotion — exponential, no fixed-step snap
+		var rec_w: float = _exp_weight(dash_recovery_rate, delta)
+		velocity.x = lerpf(dash_direction.x * recovery_speed, target_x, rec_w)
+		velocity.z = lerpf(dash_direction.z * recovery_speed, target_z, rec_w)
 	else:
 		if is_on_floor():
-			velocity.x = lerp(velocity.x, target_x, 0.28)
-			velocity.z = lerp(velocity.z, target_z, 0.28)
+			velocity.x = _smooth_vel_axis(velocity.x, target_x, ground_accel_rate, delta)
+			velocity.z = _smooth_vel_axis(velocity.z, target_z, ground_accel_rate, delta)
 		else:
-			velocity.x = lerp(velocity.x, target_x, 0.16)
-			velocity.z = lerp(velocity.z, target_z, 0.16)
+			velocity.x = _smooth_vel_axis(velocity.x, target_x, air_accel_rate, delta)
+			velocity.z = _smooth_vel_axis(velocity.z, target_z, air_accel_rate, delta)
 	# Apply lunge (only on ground, during attack)
 	if is_attacking and is_on_floor() and _lunge_velocity.length() > 0.1:
 		velocity.x += _lunge_velocity.x * delta * 11.0
@@ -3214,17 +3676,17 @@ func _physics_process(delta: float) -> void:
 	# For layered upper punches, don't damp — let lower body walk/run freely
 	var should_damp := is_attacking and _lunge_velocity.length() < 0.2 and (_is_fullbody_action or not use_layered_anims)
 	if should_damp:
-		velocity.x *= 0.42
-		velocity.z *= 0.42
-	# Stun clamp
+		velocity.x = _smooth_vel_axis(velocity.x, 0.0, attack_stop_rate, delta)
+		velocity.z = _smooth_vel_axis(velocity.z, 0.0, attack_stop_rate, delta)
+	# Stun clamp — exponential ease toward zero instead of per-frame multiply snap
 	if _stun_timer > 0.0:
-		velocity.x *= 0.22
-		velocity.z *= 0.22
+		velocity.x = _smooth_vel_axis(velocity.x, 0.0, stun_stop_rate, delta)
+		velocity.z = _smooth_vel_axis(velocity.z, 0.0, stun_stop_rate, delta)
 	# ---- Rotation modes ----
 	const YAW_OFFSET: float = PI # Mesh has flip Transform3D(-1) so +PI makes visual back to camera (away)
 	if player_mesh and spring_arm_pivot:
 		var has_input: bool = move_direction.length() > 0.1
-		var is_sprinting_now := Input.is_action_pressed("run") and velocity.length() > 0.5 and not is_aiming
+		var is_sprinting_now := Input.is_action_pressed("run") and velocity.length() > 0.5 and not is_aiming and not carrying
 		if _is_turning:
 			# Turning tween drives rotation - don't override. Still update upper look.
 			_clear_upper_skeleton_look(delta)
@@ -3243,22 +3705,22 @@ func _physics_process(delta: float) -> void:
 					face_dir = -dash_direction # flip: S+A -> forward+right, S+D -> forward+left
 				var target_yaw_diag: float = atan2(face_dir.x, face_dir.z)
 				var rot_speed: float = sprint_rotation_speed * 1.6
-				player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, target_yaw_diag, rot_speed * delta)
+				_smooth_mesh_yaw(target_yaw_diag, rot_speed, delta)
 				if abs(angle_difference(player_mesh.rotation.y, target_yaw_diag)) < 0.02:
 					player_mesh.rotation.y = target_yaw_diag
 			else:
 				# Cardinal / idle dash: keep strafe-locked (no rotation) — same as walking
 				var cam_yaw_dash: float = spring_arm_pivot.rotation.y + YAW_OFFSET
 				if instant_strafe_lock:
-					player_mesh.rotation.y = cam_yaw_dash
+					_smooth_mesh_yaw(cam_yaw_dash, 30.0, delta)
 				else:
-					player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, cam_yaw_dash, strafe_rotation_speed * delta)
+					_smooth_mesh_yaw(cam_yaw_dash, strafe_rotation_speed, delta)
 		elif is_attacking and _is_fullbody_action:
 			# Standing / kick - full body faces target (head-to-toe)
 			var aim_dir_full := _compute_aim_dir()
 			if aim_camera and is_instance_valid(aim_camera):
 				aim_dir_full = _aim_dir_from_point(_compute_aim_point())
-			_snap_to_target(aim_dir_full)
+			_snap_to_target(aim_dir_full, delta)
 			_clear_upper_skeleton_look(delta)
 		elif is_attacking and not _is_fullbody_action:
 			if is_sprinting_now:
@@ -3266,10 +3728,10 @@ func _physics_process(delta: float) -> void:
 				_clear_upper_skeleton_look(delta)
 				if has_input:
 					var target_angle := atan2(move_direction.x, move_direction.z)
-					player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, target_angle, sprint_rotation_speed * delta)
+					_smooth_mesh_yaw(target_angle, sprint_rotation_speed, delta)
 				else:
 					var cam_yaw2 := spring_arm_pivot.rotation.y + YAW_OFFSET
-					player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, cam_yaw2, strafe_rotation_speed * delta)
+					_smooth_mesh_yaw(cam_yaw2, strafe_rotation_speed, delta)
 			else:
 				# Walking filtered - keep mesh strafe-locked (legs walk where you input) but twist upper spine to target
 				var aim_dir_up := _compute_aim_dir()
@@ -3288,24 +3750,24 @@ func _physics_process(delta: float) -> void:
 				# Mesh stays facing camera, so WalkSpace handles leg direction
 				var cam_yaw3 := spring_arm_pivot.rotation.y + YAW_OFFSET
 				if instant_strafe_lock:
-					player_mesh.rotation.y = cam_yaw3
+					_smooth_mesh_yaw(cam_yaw3, 30.0, delta)
 				else:
-					player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, cam_yaw3, strafe_rotation_speed * delta)
+					_smooth_mesh_yaw(cam_yaw3, strafe_rotation_speed, delta)
 		else:
 			_clear_upper_skeleton_look(delta)
 			if is_aiming:
 				var aim_yaw: float = atan2(aim_direction.x, aim_direction.z)
-				player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, aim_yaw, strafe_rotation_speed * delta)
+				_smooth_mesh_yaw(aim_yaw, strafe_rotation_speed, delta)
 			elif is_sprinting_now and has_input:
 				var target_angle := atan2(move_direction.x, move_direction.z)
-				player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, target_angle, sprint_rotation_speed * delta)
+				_smooth_mesh_yaw(target_angle, sprint_rotation_speed, delta)
 			elif has_input:
 				# Walking / strafe: keep original strafe-locked follow (not idle)
 				var cam_yaw := spring_arm_pivot.rotation.y + YAW_OFFSET
 				if instant_strafe_lock:
-					player_mesh.rotation.y = cam_yaw
+					_smooth_mesh_yaw(cam_yaw, 30.0, delta)
 				else:
-					player_mesh.rotation.y = lerp_angle(player_mesh.rotation.y, cam_yaw, strafe_rotation_speed * delta)
+					_smooth_mesh_yaw(cam_yaw, strafe_rotation_speed, delta)
 			else:
 				# IDLE: HOLD yaw - don't follow camera continuously.
 				# Rotation only happens via 45deg threshold turn (Turn_left/Turn_right).
@@ -3484,6 +3946,9 @@ func play_pick_throw_combo(anim_name: String, speed: float = 1.25) -> void:
 		_play_c11(anim_name, 0.1, speed)
 
 func animate(delta: float) -> void:
+	# Flying drives its own fly_1/fly_2 via UpperOneShot — never let locomotion override it
+	if is_flying:
+		return
 	# Turn-in-place is exclusive - don't let Idle/Walk override Turn_left/Turn_right
 	if _is_turning or (_is_fullbody_action and c11_current_anim in ["Turn_left", "Turn_right", "turn_left", "turn_right"]):
 		return
@@ -3494,9 +3959,12 @@ func animate(delta: float) -> void:
 		# Don't block locomotion during upper punch/pickup/throw — only fullbody kick blocks slightly
 		if is_on_floor():
 			animator.set("parameters/ground_air_transition/transition_request", "grounded")
+			# While carrying a body the 1-way Run clip is off-limits (no strafe
+			# variants) — pin the blend to the 8-way walk so it can never mix.
+			var carry_lock := is_carrying_body()
 			if velocity.length() > 0.1:
-				if speed == run_speed and Input.is_action_pressed("run"):
-					animator.set("parameters/iwr_blend/blend_amount", lerp(animator.get("parameters/iwr_blend/blend_amount"), 1.0, delta * ANIMATION_BLEND))
+				if speed == run_speed and Input.is_action_pressed("run") and not carry_lock:
+					animator.set("parameters/iwr_blend/blend_amount", lerp(animator.get("parameters/iwr_blend/blend_amount"), 1.0, _exp_weight(ANIMATION_BLEND, delta)))
 				else:
 					# Slow walk — keep direction anim but still locomote while punching
 					# For upper-body punches we keep a simple Walk blend so legs keep stepping
@@ -3504,11 +3972,11 @@ func animate(delta: float) -> void:
 					var target_blend: float = 0.0
 					if velocity.length() < 0.1:
 						target_blend = -1.0
-					elif speed == run_speed and Input.is_action_pressed("run"):
+					elif speed == run_speed and Input.is_action_pressed("run") and not carry_lock:
 						target_blend = 1.0
-					animator.set("parameters/iwr_blend/blend_amount", lerp(animator.get("parameters/iwr_blend/blend_amount"), target_blend, delta * ANIMATION_BLEND))
+					animator.set("parameters/iwr_blend/blend_amount", lerp(animator.get("parameters/iwr_blend/blend_amount"), target_blend, _exp_weight(ANIMATION_BLEND, delta)))
 			else:
-				animator.set("parameters/iwr_blend/blend_amount", lerp(animator.get("parameters/iwr_blend/blend_amount"), -1.0, delta * ANIMATION_BLEND))
+				animator.set("parameters/iwr_blend/blend_amount", lerp(animator.get("parameters/iwr_blend/blend_amount"), -1.0, _exp_weight(ANIMATION_BLEND, delta)))
 			# 8-way directional walk: smoothed BlendSpace2D — lerps left<->right etc for smooth strafe
 			var ix := Input.get_action_strength("move_right") - Input.get_action_strength("move_left")
 			var iz := Input.get_action_strength("move_backwards") - Input.get_action_strength("move_forwards")
@@ -3544,7 +4012,7 @@ func animate(delta: float) -> void:
 			return
 		if is_on_floor():
 			if velocity.length() > 0.1:
-				if speed == run_speed and Input.is_action_pressed("run"):
+				if speed == run_speed and Input.is_action_pressed("run") and not is_carrying_body():
 					_play_c11("running", 0.2, 1.0)
 				else:
 					var walk_anim := _get_slow_walk_anim()
@@ -3565,11 +4033,11 @@ func animate(delta: float) -> void:
 	if is_on_floor():
 		animator.set("parameters/ground_air_transition/transition_request", "grounded")
 		if velocity.length() > 0:
-			if speed == run_speed:
-				animator.set("parameters/iwr_blend/blend_amount", lerp(animator.get("parameters/iwr_blend/blend_amount"), 1.0, delta * ANIMATION_BLEND))
+			if speed == run_speed and not is_carrying_body():
+				animator.set("parameters/iwr_blend/blend_amount", lerp(animator.get("parameters/iwr_blend/blend_amount"), 1.0, _exp_weight(ANIMATION_BLEND, delta)))
 			else:
-				animator.set("parameters/iwr_blend/blend_amount", lerp(animator.get("parameters/iwr_blend/blend_amount"), 0.0, delta * ANIMATION_BLEND))
+				animator.set("parameters/iwr_blend/blend_amount", lerp(animator.get("parameters/iwr_blend/blend_amount"), 0.0, _exp_weight(ANIMATION_BLEND, delta)))
 		else:
-			animator.set("parameters/iwr_blend/blend_amount", lerp(animator.get("parameters/iwr_blend/blend_amount"), -1.0, delta * ANIMATION_BLEND))
+			animator.set("parameters/iwr_blend/blend_amount", lerp(animator.get("parameters/iwr_blend/blend_amount"), -1.0, _exp_weight(ANIMATION_BLEND, delta)))
 	else:
 		animator.set("parameters/ground_air_transition/transition_request", "air")
