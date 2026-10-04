@@ -15,6 +15,10 @@ var item_id: String:
 var item_name: String:
 	get:
 		return item_data.display_name if item_data else ""
+## 0..1 charge the item was thrown with.
+var throw_power: float:
+	get:
+		return _throw_power
 
 var _picked: bool = false
 var _life_time: float = 0.0
@@ -96,18 +100,25 @@ func _check_impact() -> void:
 			_life_time = 0.0 # no repeat hits right away
 			break
 
-## Pick the item back up into `picker`'s hand.
-func try_interact(picker: Player) -> bool:
-	if _picked or _life_time < PICKUP_DELAY or item_data == null:
+## Pick the item back up into `picker`'s hand. `ignore_delay` replays a pickup
+## that already happened on another machine.
+func try_interact(picker: Player, ignore_delay: bool = false) -> bool:
+	if _picked or (_life_time < PICKUP_DELAY and not ignore_delay) or item_data == null:
 		return false
 	if not picker.hand.pick_up(item_data):
 		return false
+	take_away()
+	return true
+
+## Removes the item from the world (picked up, here or on another machine).
+func take_away() -> void:
+	if _picked:
+		return
 	_picked = true
 	visible = false
 	freeze = true
 	remove_from_group("pickup")
 	get_tree().create_timer(0.2).timeout.connect(queue_free)
-	return true
 
 func is_pickable() -> bool:
 	return not _picked and visible

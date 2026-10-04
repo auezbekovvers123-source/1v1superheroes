@@ -1,7 +1,8 @@
 extends PlayerState
 class_name DeadState
 ## Knocked out. RagdollController flops the body; after respawn_delay (and once
-## nobody is carrying the ragdoll) the player respawns.
+## nobody is carrying the ragdoll) the player respawns. A remote copy waits for
+## its owner's respawn instead.
 
 var _timer: float = 0.0
 
@@ -12,7 +13,7 @@ func enter(_args: Dictionary) -> void:
 
 func physics_update(delta: float) -> void:
 	_timer += delta
-	if _timer >= player.respawn_delay and not player.ragdoll.is_held():
+	if _timer >= player.respawn_delay and not player.ragdoll.is_held() and not player.is_remote():
 		player.respawn()
 
 func overrides_movement() -> bool:

@@ -26,6 +26,11 @@ class Intent:
 	var power_pressed := false
 	var fly_down_held := false
 	var debug_hitbox_pressed := false
+	## Where the controller looks. Sources without a camera of their own (network
+	## replay) fill these; otherwise the fighter reads its camera rig.
+	var has_view := false
+	var view_yaw: float = 0.0
+	var aim_point := Vector3.ZERO
 
 	func clear() -> void:
 		move = Vector2.ZERO
@@ -42,6 +47,7 @@ class Intent:
 		power_pressed = false
 		fly_down_held = false
 		debug_hitbox_pressed = false
+		has_view = false
 
 	func has_move() -> bool:
 		return move.length() > 0.12
@@ -64,6 +70,10 @@ func current() -> Intent:
 
 ## True when this source is a human on this machine (gets the camera and mouse).
 func is_local_human() -> bool:
+	return false
+
+## True when this fighter is a copy of one controlled on another machine.
+func is_remote() -> bool:
 	return false
 
 func _read(_i: Intent) -> void:

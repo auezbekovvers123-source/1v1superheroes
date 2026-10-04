@@ -25,6 +25,10 @@ var last_knockback: Vector3:
 
 var _invuln_timer: float = 0.0
 
+## Online games set this (NetSync): it decides on which machine a detected hit
+## is applied and returns whether it counts. Offline it is unset.
+var route_hit: Callable
+
 func _ready() -> void:
 	current = max_health
 	add_to_group("health")
@@ -39,10 +43,18 @@ func _physics_process(delta: float) -> void:
 func can_take_damage() -> bool:
 	return not is_dead and _invuln_timer <= 0.0
 
+## A hitbox, thrown item or other source hit this body.
 func take_damage(hit: HitInfo) -> bool:
-	if not can_take_damage():
+	if route_hit.is_valid():
+		return route_hit.call(hit)
+	return apply_damage(hit)
+
+## Applies a hit here. `hp_after` >= 0 sets the result instead of subtracting
+## (replaying a hit the owning machine already applied).
+func apply_damage(hit: HitInfo, hp_after: float = -1.0) -> bool:
+	if is_dead or (hp_after < 0.0 and not can_take_damage()):
 		return false
-	current = maxf(current - hit.damage, 0.0)
+	current = maxf(current - hit.damage, 0.0) if hp_after < 0.0 else clampf(hp_after, 0.0, max_health)
 	_invuln_timer = invuln_time
 	last_hit = hit
 	health_changed.emit(current, max_health)
@@ -54,6 +66,13 @@ func take_damage(hit: HitInfo) -> bool:
 		is_dead = true
 		died.emit(hit)
 	return true
+
+## Overwrites the hit points without any hit (synced from the owning machine).
+func set_current(value: float) -> void:
+	if is_dead:
+		return
+	current = clampf(value, 0.0, max_health)
+	health_changed.emit(current, max_health)
 
 func heal(amount: float) -> void:
 	if is_dead:

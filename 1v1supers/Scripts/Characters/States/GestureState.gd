@@ -58,12 +58,15 @@ func physics_update(delta: float) -> void:
 	_timer += delta
 	if _action_time >= 0.0 and _timer >= _action_time:
 		_action_time = -1.0
-		if not is_instance_valid(_target):
-			pass # someone else got it first
+		var got := false
+		if not is_instance_valid(_target) or player.is_remote():
+			pass # someone else got it first / a remote copy's owner reports what it picked up
 		elif _target is ItemPickup:
-			(_target as ItemPickup).try_interact(player)
+			got = (_target as ItemPickup).try_interact(player)
 		elif _target is ThrownItem:
-			(_target as ThrownItem).try_interact(player)
+			got = (_target as ThrownItem).try_interact(player)
+		if got:
+			player.picked_from_world.emit(_target)
 	if _timer >= _total:
 		player.change_state(&"free")
 

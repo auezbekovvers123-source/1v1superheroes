@@ -15,6 +15,9 @@ class_name Player
 ##    Inventory, Equipment.
 
 signal state_changed(from: StringName, to: StringName)
+signal respawned()
+## A world item (ItemPickup / ThrownItem) went into this fighter's hand.
+signal picked_from_world(item: Node3D)
 
 @export_group("Movement")
 @export var walk_speed: float = 2.1
@@ -243,6 +246,10 @@ func is_flying() -> bool:
 func is_dead() -> bool:
 	return state.name == &"dead"
 
+## True when this fighter is a copy of one controlled on another machine (online).
+func is_remote() -> bool:
+	return input != null and input.is_remote()
+
 # --- Frame ---------------------------------------------------------------------
 
 func _physics_process(delta: float) -> void:
@@ -463,6 +470,8 @@ func _apply_upper_twist() -> void:
 # --- Aim / camera helpers --------------------------------------------------------
 
 func camera_yaw() -> float:
+	if intent and intent.has_view:
+		return intent.view_yaw # remote copy: the owner's camera
 	return camera_rig.rotation.y
 
 ## Flat direction the camera looks along.
@@ -487,6 +496,8 @@ func aim_direction_from_camera() -> Vector3:
 
 ## World point under the crosshair (ray from the camera through the screen centre).
 func aim_point() -> Vector3:
+	if intent and intent.has_view:
+		return intent.aim_point
 	if aim_camera == null:
 		return global_position + camera_forward() * 20.0
 	var centre := get_viewport().get_visible_rect().size * 0.5
@@ -651,6 +662,10 @@ func _on_hit_landed(target: Node3D, hit: HitInfo) -> void:
 func _on_died(_hit: HitInfo) -> void:
 	change_state(&"dead") # RagdollController launches the body
 
+## Where respawn() puts the fighter (online games give each fighter its own spot).
+func set_spawn_point(pos: Vector3) -> void:
+	_spawn_point = pos + Vector3.UP * respawn_height
+
 func respawn() -> void:
 	grabber.release_grab()
 	ragdoll.reset_ragdoll()
@@ -667,6 +682,7 @@ func respawn() -> void:
 	animator.reset()
 	animator.set_hold(&"item", hand.is_holding())
 	change_state(&"free")
+	respawned.emit()
 
 # --- Hands / gear (public API used by the UI, pickups and tests) --------------------
 

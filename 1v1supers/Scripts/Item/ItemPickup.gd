@@ -94,6 +94,16 @@ func try_interact(picker: Player) -> bool:
 		return false
 	if not picker.hand.pick_up(get_item_data()):
 		return false
+	_take(picker)
+	return true
+
+## Removes the item from the world without giving it to anyone here (someone
+## on another machine picked it up).
+func take_away() -> void:
+	if not _picked:
+		_take(null)
+
+func _take(picker: Player) -> void:
 	_picked = true
 	picked_up.emit(picker, item_id)
 	set_deferred("monitoring", false)
@@ -106,7 +116,6 @@ func try_interact(picker: Player) -> bool:
 		get_tree().create_timer(respawn_time).timeout.connect(_respawn)
 	else:
 		get_tree().create_timer(0.35).timeout.connect(queue_free)
-	return true
 
 func _respawn() -> void:
 	_picked = false

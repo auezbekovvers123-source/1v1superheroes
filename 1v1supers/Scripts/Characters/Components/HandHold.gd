@@ -19,6 +19,9 @@ class_name HandHold
 @export var throw_release_anim_speed: float = 1.35
 @export var drop_power: float = 0.05 # "drop" = a very weak throw
 
+## A thrown item left the hand (online games mirror it on the other machines).
+signal thrown(item: ThrownItem)
+
 const HAND_BONES: Array[String] = ["hand.r", "hand_r", "RightHand", "hand.R", "Hand_R"]
 
 var player: Player
@@ -79,6 +82,8 @@ func throw_item(power: float) -> bool:
 	var data := held_item
 	if data == null:
 		return false
+	if player.is_remote():
+		return true # the owner's machine throws; its copy of the item arrives over the network
 	power = clampf(power, 0.01, 1.0)
 	var spawn_pos := _hand_spawn_pos(power)
 	inventory.remove_item(data) # clears the visual + hold pose via the signal
@@ -119,6 +124,20 @@ func _spawn_thrown(data: ItemData, spawn_pos: Vector3, power: float) -> void:
 	item.launch(data, dir * speed, power, player, throw_angular_tumble)
 	player.camera_shake(lerpf(0.08, 0.28, power))
 	player.camera_rig.kick_fov(power * 3.0)
+	thrown.emit(item)
+
+## Replays a throw made on another machine: the item leaves this (remote) hand
+## exactly where and how fast it left the owner's.
+func throw_replayed(data: ItemData, item_name: String, pos: Vector3, velocity: Vector3, spin: Vector3, power: float) -> ThrownItem:
+	if held_item:
+		inventory.remove_item(held_item)
+	var item := ThrownItem.new()
+	item.name = item_name
+	HitEffects.parent_for(player).add_child(item)
+	item.global_position = pos
+	item.launch(data, velocity, power, player, 0.0)
+	item.angular_velocity = spin
+	return item
 
 # --- Use --------------------------------------------------------------------------
 
