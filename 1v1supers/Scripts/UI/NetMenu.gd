@@ -175,9 +175,10 @@ func _link_stats(peer: int) -> String:
 
 func _build() -> void:
 	_corner = Label.new()
-	_corner.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	_corner.position = Vector2(-330, 12)
-	_corner.size = Vector2(318, 20)
+	_corner.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	_corner.offset_left = -330
+	_corner.offset_right = -12
+	_corner.offset_top = 12
 	_corner.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_corner.add_theme_font_size_override("font_size", 13)
 	_corner.modulate = Color(1, 1, 1, 0.75)
@@ -185,9 +186,11 @@ func _build() -> void:
 	add_child(_corner)
 
 	_panel = PanelContainer.new()
-	_panel.set_anchors_preset(Control.PRESET_CENTER)
+	# Centred however tall its contents make it
+	_panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
+	_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
 	_panel.custom_minimum_size = Vector2(440, 0)
-	_panel.position = Vector2(-220, -300)
 	var style := StyleBoxFlat.new()
 	style.bg_color = Color(0.07, 0.08, 0.1, 0.94)
 	style.set_corner_radius_all(8)

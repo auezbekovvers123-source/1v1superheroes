@@ -34,12 +34,14 @@ func _ready() -> void:
 	_stamina_label = _make_label(root, Vector2(22, 40), 10, Color.WHITE)
 	_combo_label = _make_label(root, Vector2(18, 60), 22, Color(1, 0.92, 0.28))
 
+	# Full-width strip with centred text: stays centred at any window size (a
+	# centre anchor set before the HUD has a size put it in a corner)
 	var title := _make_label(root, Vector2.ZERO, 22, Color.WHITE)
 	title.text = "GOOF - prototype"
 	title.modulate = Color(1, 1, 1, 0.78)
-	title.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	title.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	title.offset_top = 18
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.position.y = 18
 
 	await get_tree().process_frame
 	player = get_tree().get_first_node_in_group("local_player") as Player
