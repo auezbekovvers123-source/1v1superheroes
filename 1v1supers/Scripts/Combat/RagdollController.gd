@@ -1,21 +1,33 @@
 extends Node
 class_name RagdollController
-## RagdollController — GTA5 style ragdoll on death
-## Drop as child of CharacterBody3D (Player or Dummy). Auto-finds Skeleton3D, builds PhysicalBones,
-## starts simulation on death, applies knockback impulse and lets physics flop.
-## Supports both C11 (C11.glb) skeleton and Object_Character skeleton generically.
+## GTA-style ragdoll for a CharacterBody3D (Player or Dummy). Builds PhysicalBones
+## for the character's Skeleton3D on first use and is the ONLY thing that starts a
+## death ragdoll: it listens to Health.died and launches the body along the
+## killing blow's knockback.
+
+## A grabber holding this ragdoll changes this (RagdollGrabber sets/clears it).
+signal held_changed(is_held: bool)
+## Emitted right before the bones go physical: the body should stop any mesh
+## scale effects (Jolt cannot simulate non-uniformly scaled bodies).
+signal about_to_start()
 
 @export var skeleton_path: NodePath = NodePath("")
 @export var capsule_radius_scale: float = 1.0
-@export var keep_simulating_on_respawn: bool = false
-@export var auto_find_skeleton: bool = true
 @export var impulse_multiplier: float = 1.0 # scales every death launch
 @export var death_impulse: float = 7.0 # launch strength when the killing blow had no knockback
 @export var debug_log: bool = false
 
 var skeleton: Skeleton3D = null
+## The fighter carrying this ragdoll right now (null when not held).
+var held_by: Node3D = null:
+	set(v):
+		var was := held_by != null
+		held_by = v
+		if was != (v != null):
+			held_changed.emit(v != null)
+
 var _character_body: CharacterBody3D = null
-var _health: Node = null
+var _health: Health = null
 var _anim_player: AnimationPlayer = null
 var _anim_tree: AnimationTree = null
 var _collision_shape: CollisionShape3D = null
@@ -23,217 +35,157 @@ var _original_collision_layer: int = 1
 var _original_collision_mask: int = 1
 var _is_ragdolled: bool = false
 var _built: bool = false
-var _last_hit_dir: Vector3 = Vector3.ZERO
-var _last_hit_pos: Vector3 = Vector3.ZERO
 
 # GTA feel tuning
 const DAMP_LINEAR: float = 0.35
 const DAMP_ANGULAR: float = 0.38
-const JOINT_DAMP: float = 0.25
 
 func _ready() -> void:
+	add_to_group("ragdoll")
 	_character_body = get_parent() as CharacterBody3D
-	if _character_body == null:
-		# search up
-		var p := get_parent()
-		while p and not p is CharacterBody3D:
-			p = p.get_parent()
-		_character_body = p as CharacterBody3D
 	if _character_body:
 		_original_collision_layer = _character_body.collision_layer
 		_original_collision_mask = _character_body.collision_mask
 		_collision_shape = _character_body.get_node_or_null("CollisionShape3D") as CollisionShape3D
-		_health = _character_body.get_node_or_null("Health")
-		if _health and _health.has_signal("died"):
-			if not _health.died.is_connected(_on_health_died):
-				_health.died.connect(_on_health_died)
-			if _health.has_signal("health_changed") and not _health.health_changed.is_connected(_on_health_changed):
-				pass
-		# Also listen for respawn/reset: Health emits health_changed when revived, but better hook explicit
-		# Dummy/Player will call reset_ragdoll() on respawn.
-
+		_health = _character_body.get_node_or_null("Health") as Health
+		if _health:
+			_health.died.connect(_on_health_died)
+		_anim_tree = _character_body.get_node_or_null("AnimationTree") as AnimationTree
 	_find_skeleton()
-	_find_anim_players()
-	if debug_log:
-		print("[Ragdoll] ready on %s skeleton=%s" % [_character_body.name if _character_body else "?", skeleton])
+	if _character_body:
+		_anim_player = _find_first(_character_body, "AnimationPlayer") as AnimationPlayer
+
+func get_body() -> CharacterBody3D:
+	return _character_body
+
+func is_ragdolled() -> bool:
+	return _is_ragdolled
+
+func is_held() -> bool:
+	return held_by != null and is_instance_valid(held_by)
+
+## Every PhysicalBone3D of the ragdoll (empty until first ragdolled).
+func get_bones() -> Array[PhysicalBone3D]:
+	var out: Array[PhysicalBone3D] = []
+	if skeleton:
+		for c in skeleton.get_children():
+			if c is PhysicalBone3D:
+				out.append(c)
+	return out
+
+func get_bone(bone_name: String) -> PhysicalBone3D:
+	for b in get_bones():
+		if String(b.bone_name) == bone_name:
+			return b
+	return null
 
 func _find_skeleton() -> void:
 	if skeleton and is_instance_valid(skeleton):
 		return
-	if skeleton_path != NodePath("") :
+	if skeleton_path != NodePath(""):
 		skeleton = get_node_or_null(skeleton_path) as Skeleton3D
-		if skeleton:
-			return
-	if auto_find_skeleton and _character_body:
-		skeleton = _search_skeleton(_character_body)
-	if skeleton == null:
-		# fallback global search
-		skeleton = _search_skeleton(get_tree().current_scene) if get_tree().current_scene else null
+	if skeleton == null and _character_body:
+		skeleton = _find_first(_character_body, "Skeleton3D") as Skeleton3D
 
-func _search_skeleton(node: Node) -> Skeleton3D:
-	if node is Skeleton3D:
-		return node as Skeleton3D
+static func _find_first(node: Node, type_name: String) -> Node:
+	if node == null:
+		return null
+	if node.is_class(type_name):
+		return node
 	for c in node.get_children():
-		var r := _search_skeleton(c)
+		var r := _find_first(c, type_name)
 		if r:
 			return r
 	return null
-
-func _find_anim_players() -> void:
-	if _character_body == null:
-		return
-	_anim_player = _find_anim_player(_character_body)
-	_anim_tree = _character_body.get_node_or_null("AnimationTree") as AnimationTree
-	if _anim_tree == null:
-		_anim_tree = _find_anim_tree(_character_body)
-
-func _find_anim_player(n: Node) -> AnimationPlayer:
-	if n is AnimationPlayer:
-		return n as AnimationPlayer
-	for c in n.get_children():
-		var f := _find_anim_player(c)
-		if f:
-			return f
-	return null
-
-func _find_anim_tree(n: Node) -> AnimationTree:
-	if n is AnimationTree:
-		return n as AnimationTree
-	for c in n.get_children():
-		var f := _find_anim_tree(c)
-		if f:
-			return f
-	return null
-
-# --- Public API ---
-func is_ragdolled() -> bool:
-	return _is_ragdolled
 
 func start_ragdoll(hit_direction: Vector3 = Vector3.ZERO, hit_position: Vector3 = Vector3.ZERO, hit_strength: float = 5.0) -> void:
 	if _is_ragdolled:
 		return
 	_find_skeleton()
 	if skeleton == null:
-		push_warning("[Ragdoll] No Skeleton3D found for %s" % (_character_body.name if _character_body else "unknown"))
+		push_warning("[Ragdoll] No Skeleton3D found for %s" % (str(_character_body.name) if _character_body else "unknown"))
 		return
 	_ensure_physical_bones()
-
-	_last_hit_dir = hit_direction
-	_last_hit_pos = hit_position
-
-	# Stop animations
+	about_to_start.emit()
+	# Freeze animation so the bones start from the current pose
 	if _anim_tree:
 		_anim_tree.active = false
 	if _anim_player:
 		_anim_player.active = false
 		_anim_player.stop(false)
-		# keep current pose frozen so physical bones spawn in place
-		# don't reset
-
-	# Disable CharacterBody collision so it doesn't fight physical bones
+	# The CharacterBody must not fight the physical bones
 	if _character_body:
 		_character_body.collision_layer = 0
 		_character_body.collision_mask = 0
 		if _collision_shape:
 			_collision_shape.disabled = true
-		# Stop movement
 		_character_body.velocity = Vector3.ZERO
-		# Disable processing that would move body (Player/Dummy will check is_ragdolled)
-
-	# Start physics simulation
 	skeleton.physical_bones_start_simulation()
-	# Also ensure all PhysicalBones are awake and have proper layers
-	for child in skeleton.get_children():
-		if child is PhysicalBone3D:
-			var pb := child as PhysicalBone3D
-			# can_sleep is valid; sleeping/freeze are not on PhysicalBone3D in Godot 4
-			pb.can_sleep = false
-			# Restore collision layers (reset_ragdoll zeroes them)
-			pb.collision_layer = 1
-			pb.collision_mask = 1
-
+	for pb in get_bones():
+		pb.can_sleep = false
+		pb.collision_layer = 1 # reset_ragdoll zeroes these
+		pb.collision_mask = 1
 	_is_ragdolled = true
-
-	# Apply GTA-style impulse next physics frame to ensure bodies are awake
+	# Apply the launch next frame so the bodies are awake
 	call_deferred("_apply_ragdoll_impulse", hit_direction, hit_position, hit_strength)
 	if debug_log:
-		print("[Ragdoll] START %s dir=%s pos=%s str=%.1f" % [_character_body.name, hit_direction, hit_position, hit_strength])
+		print("[Ragdoll] START %s dir=%s str=%.1f" % [_character_body.name, hit_direction, hit_strength])
 
-func reset_ragdoll() -> void:
+## Stops the simulation and puts the character back under animation control.
+## restore_collision=false leaves the body's CollisionShape3D disabled (the caller
+## re-enables it later, e.g. after a respawn lock).
+func reset_ragdoll(restore_collision: bool = true) -> void:
 	if not _is_ragdolled and not _built:
 		return
+	held_by = null
 	if skeleton and is_instance_valid(skeleton):
-		for child in skeleton.get_children():
-			if child is PhysicalBone3D:
-				var pb := child as PhysicalBone3D
-				pb.linear_velocity = Vector3.ZERO
-				pb.angular_velocity = Vector3.ZERO
-				pb.can_sleep = true
+		for pb in get_bones():
+			pb.linear_velocity = Vector3.ZERO
+			pb.angular_velocity = Vector3.ZERO
+			pb.can_sleep = true
 		if _is_ragdolled:
 			skeleton.physical_bones_stop_simulation()
-			for child in skeleton.get_children():
-				if child is PhysicalBone3D:
-					var pb2 := child as PhysicalBone3D
-					pb2.linear_velocity = Vector3.ZERO
-					pb2.angular_velocity = Vector3.ZERO
-			if skeleton.has_method("reset_bone_poses"):
-				skeleton.reset_bone_poses()
-			elif skeleton.has_method("clear_bones_global_pose_override"):
-				skeleton.clear_bones_global_pose_override()
-			if skeleton.has_method("force_update_bone_child_transforms"):
-				skeleton.force_update_bone_child_transforms()
+			skeleton.reset_bone_poses()
+			skeleton.force_update_all_bone_transforms()
+		# Free the physical bones until the next death: left in place they follow the
+		# animated skeleton, whose stretch bones scale non-uniformly, and Jolt rebuilds
+		# (and complains about) every bone shape on each scale change.
+		for pb in get_bones():
+			skeleton.remove_child(pb)
+			pb.queue_free()
+		_built = false
 	_is_ragdolled = false
-	# Disable physical bone collisions so they don't fight CharacterBody3D move_and_slide
-	if skeleton and is_instance_valid(skeleton):
-		for child in skeleton.get_children():
-			if child is PhysicalBone3D:
-				var pb3 := child as PhysicalBone3D
-				pb3.collision_layer = 0
-				pb3.collision_mask = 0
 	if _character_body:
 		_character_body.collision_layer = _original_collision_layer
 		_character_body.collision_mask = _original_collision_mask
-		if _collision_shape and is_instance_valid(_collision_shape):
-			var lock_active: bool = false
-			if _character_body.get("_respawn_lock") != null:
-				lock_active = float(_character_body.get("_respawn_lock")) > 0.0
-			if not lock_active:
-				_collision_shape.disabled = false
+		if _collision_shape and restore_collision:
+			_collision_shape.disabled = false
 		_character_body.velocity = Vector3.ZERO
-		if _character_body.has_method("reset_physics_interpolation"):
-			_character_body.reset_physics_interpolation()
-
-	# Re-enable animations
-	if _anim_tree and is_instance_valid(_anim_tree):
+		_character_body.reset_physics_interpolation()
+	if _anim_tree:
 		_anim_tree.active = true
-	if _anim_player and is_instance_valid(_anim_player):
+	if _anim_player:
 		_anim_player.active = true
-		# play idle
-		if _anim_player.has_animation("Idle"):
+		if _anim_tree == null and _anim_player.has_animation("Idle"):
 			_anim_player.play("Idle", 0.2)
-		elif _anim_player.has_animation("idle"):
-			_anim_player.play("idle", 0.2)
-		# Ensure skeleton pose is fresh
-		if skeleton and is_instance_valid(skeleton) and skeleton.has_method("force_update_bone_child_transforms"):
-			skeleton.force_update_bone_child_transforms()
-
 	if debug_log and _character_body:
 		print("[Ragdoll] RESET %s" % _character_body.name)
 
 ## The ONLY place a death ragdoll is started. Direction/strength come from the
 ## killing blow's knockback when there was one, else from the killer's position.
-func _on_health_died(killer: Node) -> void:
+func _on_health_died(hit: HitInfo) -> void:
 	if _character_body == null:
 		return
+	var killer: Node3D = hit.attacker if hit else null
 	var pos: Vector3 = _character_body.global_position + Vector3(0, 0.9, 0)
 	var dir := Vector3.ZERO
 	var strength: float = death_impulse
-	var kb: Vector3 = _health.last_knockback if _health is Health else Vector3.ZERO
+	var kb: Vector3 = hit.knockback if hit else Vector3.ZERO
 	if kb.length() > 0.5:
 		dir = kb.normalized()
 		strength = kb.length() * 0.9 + 5.0
-	elif killer is Node3D and killer != _character_body:
-		dir = _character_body.global_position - (killer as Node3D).global_position
+	elif killer and is_instance_valid(killer) and killer != _character_body:
+		dir = _character_body.global_position - killer.global_position
 		dir.y = 0.2
 		if dir.length() < 0.1:
 			dir = Vector3.FORWARD
@@ -246,9 +198,6 @@ func _on_health_died(killer: Node) -> void:
 	else:
 		dir = Vector3(randf_range(-1, 1), 0.2, randf_range(-1, 1)).normalized()
 	start_ragdoll(dir, pos, strength * impulse_multiplier)
-
-func _on_health_changed(_cur: float, _max: float) -> void:
-	pass
 
 # --- Internal: build physical bones ---
 func _ensure_physical_bones() -> void:
@@ -268,7 +217,7 @@ func _ensure_physical_bones() -> void:
 
 	var bone_count := skeleton.get_bone_count()
 	if debug_log:
-		print("[Ragdoll] Building %d bones for %s" % [bone_count, _character_body.name if _character_body else "?"])
+		print("[Ragdoll] Building %d bones for %s" % [bone_count, str(_character_body.name) if _character_body else "?"])
 		for i in range(bone_count):
 			print("  bone %d: %s parent=%d" % [i, skeleton.get_bone_name(i), skeleton.get_bone_parent(i)])
 
@@ -288,7 +237,7 @@ func _ensure_physical_bones() -> void:
 			if lname != "hand.l" and lname != "hand.r" and lname != "lefthand" and lname != "righthand" and lname != "hand.l" and lname != "hand.r":
 				continue
 		# Create PhysicalBone
-		var cfg := _config_for_bone(bname, i)
+		var cfg := _config_for_bone(bname)
 		if cfg.is_empty():
 			continue
 		var pb := PhysicalBone3D.new()
@@ -306,7 +255,7 @@ func _ensure_physical_bones() -> void:
 		pb.collision_mask = 1
 		# Joint: choose based on bone
 		var jtype: int = cfg.get("joint_type", 0) # 0=PIN
-		pb.joint_type = jtype
+		pb.joint_type = jtype as PhysicalBone3D.JointType
 		# Damping for joint
 		# Note: joint_damp not exposed? Use body damp already.
 
@@ -363,7 +312,7 @@ func _count_physical_bones() -> int:
 			c += 1
 	return c
 
-func _config_for_bone(bname: String, idx: int) -> Dictionary:
+func _config_for_bone(bname: String) -> Dictionary:
 	var lname := bname.to_lower()
 	var cfg: Dictionary = {}
 

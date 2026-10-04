@@ -15,9 +15,7 @@ class_name InventoryUI
 
 const EquipSocket3DScript = preload("res://Scripts/UI/EquipSocket3D.gd")
 
-var player: CharacterBody3D = null
-var inventory: Node = null
-var equipment: Node = null
+var player: Player = null
 
 var _is_open: bool = false
 
@@ -40,7 +38,6 @@ var _drag_press_pos: Vector2 = Vector2.ZERO
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	layer = 100
-	add_to_group("inventory_ui") # Player gates its input while this is open
 	_build_ui()
 	_hide_inventory()
 
@@ -49,27 +46,12 @@ func _ready() -> void:
 	_find_player()
 
 func _find_player() -> void:
-	var scene_root := get_tree().current_scene
-	if scene_root:
-		player = scene_root.get_node_or_null("Prototype/Player") as CharacterBody3D
-		if player == null:
-			player = scene_root.get_node_or_null("Player") as CharacterBody3D
-	if player == null:
-		var fighters := get_tree().get_nodes_in_group("fighter")
-		for f in fighters:
-			if f is CharacterBody3D and f.has_node("Equipment"):
-				player = f as CharacterBody3D
-				break
-	if player:
-		inventory = player.get_node_or_null("Inventory")
-		equipment = player.get_node_or_null("Equipment")
-		if inventory and inventory.has_signal("inventory_changed"):
-			if not inventory.inventory_changed.is_connected(_refresh_sockets):
-				inventory.inventory_changed.connect(_refresh_sockets)
-		if inventory and inventory.has_signal("held_item_changed"):
-			if not inventory.held_item_changed.is_connected(_on_held_via_inventory):
-				inventory.held_item_changed.connect(_on_held_via_inventory)
-		print("[InventoryUI] Connected to player: %s" % player.name)
+	player = get_tree().get_first_node_in_group("local_player") as Player
+	if player and not player.inventory.inventory_changed.is_connected(_refresh_sockets):
+		player.inventory.inventory_changed.connect(_refresh_sockets)
+		player.inventory.held_item_changed.connect(_on_held_via_inventory)
+		player.equipment.item_equipped.connect(func(_s, _i): _refresh_sockets())
+		player.equipment.item_unequipped.connect(func(_s, _i): _refresh_sockets())
 
 func _on_held_via_inventory(_item: ItemData) -> void:
 	_refresh_sockets()
@@ -101,7 +83,7 @@ func _ensure_sockets() -> void:
 		return
 	if player == null:
 		return
-	_skeleton = _search_skeleton(player)
+	_skeleton = player.get_skeleton()
 	if _skeleton == null:
 		push_warning("[InventoryUI] No Skeleton3D found on player — sockets disabled")
 		return
@@ -136,15 +118,6 @@ func _create_socket(slot_id: int, preferred_bone: String, bone_offset: Vector3, 
 	sock.anchor = marker
 	_anchors[slot_id] = marker
 	_sockets[slot_id] = sock
-
-func _search_skeleton(n: Node) -> Skeleton3D:
-	if n is Skeleton3D:
-		return n as Skeleton3D
-	for c in n.get_children():
-		var r = _search_skeleton(c)
-		if r:
-			return r
-	return null
 
 # ───────────────────────────────────────────────────
 #  Per-Frame: project sockets to screen, drive drag feedback
@@ -184,11 +157,10 @@ func _process(delta: float) -> void:
 # ───────────────────────────────────────────────────
 
 func _input(event: InputEvent) -> void:
-	if event is InputEventKey and event.pressed and not event.echo:
-		if event.keycode == KEY_TAB:
-			toggle()
-			get_viewport().set_input_as_handled()
-			return
+	if event.is_action_pressed("inventory") and not event.is_echo():
+		toggle()
+		get_viewport().set_input_as_handled()
+		return
 
 	if not _is_open:
 		return
@@ -240,8 +212,6 @@ func _begin_drag(item: ItemData, source_socket: EquipSocket3D) -> void:
 	if _ghost:
 		_ghost.color = item.preview_color
 		_ghost.visible = true
-	var from := "HAND" if source_socket and source_socket.slot == ItemData.EquipSlot.HAND else ("socket %d" % source_socket.slot if source_socket else "unknown")
-	print("[InventoryUI] Drag started: '%s' (from %s)" % [item.display_name, from])
 
 func _end_drag() -> void:
 	if not _drag_active or _drag_item == null:
@@ -259,7 +229,7 @@ func _end_drag() -> void:
 	if source_socket and source_socket.slot == ItemData.EquipSlot.HAND:
 		# ── HAND (6) → equip ring (1-5): equip ──
 		if target_sock and target_sock.slot == item.slot and target_sock.slot != ItemData.EquipSlot.HAND:
-			_on_socket_equipped(target_sock.slot, item)
+			player.equip_from_hand(target_sock.slot)
 		elif clicked_same:
 			# Click HAND alone — no equip target: optionally drop (handled by right-click) so do nothing
 			pass
@@ -267,16 +237,10 @@ func _end_drag() -> void:
 	else:
 		# ── Equip ring (1-5) → HAND (6): unequip into HAND ──
 		if target_sock and target_sock.slot == ItemData.EquipSlot.HAND:
-			if inventory and not inventory.can_pickup():
-				print("[InventoryUI] HAND full — drop it (G) before storing gear")
-			else:
-				_on_socket_unequipped(source_socket.slot, item)
+			player.unequip_to_hand(source_socket.slot) # fails while the hand is full
 		elif clicked_same:
-			# Click equip ring itself → quick-unequip to HAND
-			if inventory and not inventory.can_pickup():
-				print("[InventoryUI] HAND full — drop it (G) before storing gear")
-			else:
-				_on_socket_unequipped(source_socket.slot, item)
+			# Click the equip ring itself: quick-unequip to HAND
+			player.unequip_to_hand(source_socket.slot)
 		# else: dropped nowhere valid → stays equipped
 
 	_drag_item = null
@@ -303,22 +267,21 @@ func toggle() -> void:
 	else:
 		open_inventory()
 
-## Player.gd polls this to gate WASD/jump/keys while the inventory owns the mouse.
 func is_inventory_open() -> bool:
 	return _is_open
 
 func open_inventory() -> void:
-	if player == null or inventory == null or equipment == null:
+	if player == null:
 		_find_player()
+	if player == null:
+		return
 	_is_open = true
 	_root.visible = true
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	# Game keeps running (no pause) — only player input is gated via the group
-
-	# Smoothly swing the gameplay camera to face the character's front
-	var pivot: Node = player.get_node_or_null("SpringArmPivot") if player else null
-	if pivot and pivot.has_method("set_inventory_mode"):
-		pivot.set_inventory_mode(true)
+	# The game keeps running (no pause). The UI owns the mouse now: the fighter ignores its input, the camera swings
+	# round to face the character's front
+	player.input.enabled = false
+	player.camera_rig.set_inventory_mode(true)
 
 	_ensure_sockets()
 	_set_sockets_visible(true)
@@ -330,9 +293,9 @@ func close_inventory() -> void:
 	_set_sockets_visible(false)
 	_root.visible = false
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-	var pivot: Node = player.get_node_or_null("SpringArmPivot") if player else null
-	if pivot and pivot.has_method("set_inventory_mode"):
-		pivot.set_inventory_mode(false)
+	if player:
+		player.input.enabled = true
+		player.camera_rig.set_inventory_mode(false)
 
 ## Bone-attached sockets live under BoneAttachment3D nodes on the skeleton, NOT
 ## under _socket_root — so visibility must be toggled per socket, not just on the root.
@@ -353,174 +316,20 @@ func _hide_inventory() -> void:
 # ───────────────────────────────────────────────────
 
 func _refresh_sockets() -> void:
-	if _sockets.is_empty():
+	if _sockets.is_empty() or player == null:
 		return
-	# Equipment sockets (1-5)
-	if equipment != null:
-		var equipped: Dictionary = equipment.list_equipped()
-		for slot_id in _sockets.keys():
-			if slot_id == 6:
-				continue # HAND socket mirrors the inventory below
-			var sock: EquipSocket3D = _sockets[slot_id]
-			if equipped.has(slot_id) and equipped[slot_id] != null:
-				sock.set_equipped(_find_item_data_for_wearable(equipped[slot_id], slot_id))
-			else:
-				sock.clear_equipped()
-	# HAND socket (6) displays the inventory's held item
-	if _sockets.has(6):
-		var held = inventory.get_held_item() if inventory and inventory.has_method("get_held_item") else null
-		if held:
-			_sockets[6].set_equipped(held)
+	# Equip rings (1-5) show what is worn; the HAND ring (6) shows the held item
+	var worn: Dictionary = player.equipment.list_items()
+	for slot_id in _sockets.keys():
+		var item: ItemData = player.held_item if slot_id == ItemData.EquipSlot.HAND else worn.get(slot_id)
+		if item:
+			_sockets[slot_id].set_equipped(item)
 		else:
-			_sockets[6].clear_equipped()
+			_sockets[slot_id].clear_equipped()
 
-func _find_item_data_for_wearable(wearable: Node, slot_id: int) -> ItemData:
-	if wearable and "item_id" in wearable:
-		var wearable_id: String = wearable.get("item_id")
-		if wearable_id == "cloak_01":
-			var res = load("res://Assets/Item/Cloak Assets/cloak_item.tres")
-			if res is ItemData:
-				return res
-		var data := ItemData.new()
-		data.id = wearable_id
-		data.display_name = wearable.get("item_name") if "item_name" in wearable else wearable_id
-		data.slot = slot_id
-		if wearable is WearableItem:
-			data.scene = load(wearable.scene_file_path) if wearable.scene_file_path != "" else null
-			data.bone_name = wearable.bone_name
-		data.preview_color = Color(0.78, 0.12, 0.12)
-		return data
-	var data := ItemData.new()
-	data.id = "unknown_%d" % slot_id
-	data.display_name = "Item"
-	data.slot = slot_id
-	data.preview_color = Color(0.5, 0.5, 0.5)
-	return data
-
-# ───────────────────────────────────────────────────
-#  Drop Item Into The World (right-click HAND ring)
-# ───────────────────────────────────────────────────
-
-func _on_hand_right_clicked(item: ItemData) -> void:
-	if inventory == null or item == null:
-		return
-	# Delegate to player's drop (handles hand attachment & spawn)
-	if player and player.has_method("is_holding_item") and player.has_method("drop_held_item"):
-		if player.call("is_holding_item"):
-			var held = player.get("held_item") as ItemData
-			if held == item:
-				player.call("drop_held_item")
-				print("[InventoryUI] Dropped '%s' via HAND ring right-click" % item.display_name)
-				_refresh_sockets()
-				return
-	inventory.remove_item(item)
-	_spawn_item_pickup_in_world(item)
-	print("[InventoryUI] Dropped '%s' into the world (hand ring)" % item.display_name)
-	_refresh_sockets()
-
-func _spawn_item_pickup_in_world(item: ItemData) -> void:
-	if player == null or item == null:
-		return
-	if player and player.has_method("is_holding_item") and player.call("is_holding_item"):
-		var held = player.get("held_item")
-		if held == item and player.has_method("drop_held_item"):
-			player.call("drop_held_item")
-			return
-	var spawn_pos: Vector3 = player.global_position
-	var forward: Vector3 = Vector3.FORWARD
-	if player.has_node("Mesh"):
-		var m: Node3D = player.get_node("Mesh") as Node3D
-		forward = m.global_transform.basis.z.normalized()
-	elif player.has_node("SpringArmPivot"):
-		forward = Vector3.FORWARD.rotated(Vector3.UP, player.get_node("SpringArmPivot").rotation.y)
-	forward.y = 0.0
-	if forward.length() > 0.1:
-		spawn_pos += forward.normalized() * 1.6
-	spawn_pos.y += 0.5
-	var pickup_scene: PackedScene = null
-	if item.id == "cloak_01":
-		pickup_scene = load("res://Scenes/Items/CloakPickup.tscn")
-	elif item.id == "usable_01":
-		pickup_scene = load("res://Scenes/Items/UsablePickup.tscn")
-	elif item.id == "holdable_01":
-		pickup_scene = load("res://Scenes/Items/RockPickup.tscn")
-	elif item.slot == ItemData.EquipSlot.HAND:
-		if item.is_usable:
-			pickup_scene = load("res://Scenes/Items/UsablePickup.tscn")
-		else:
-			pickup_scene = load("res://Scenes/Items/RockPickup.tscn")
-	var inst: Node3D = null
-	if pickup_scene:
-		inst = pickup_scene.instantiate() as Node3D
-	else:
-		var pickup_script = load("res://Scripts/Item/ItemPickup.gd")
-		var area = Area3D.new()
-		area.set_script(pickup_script)
-		inst = area
-	if inst:
-		inst.set("item_data", item)
-		inst.set("item_name", item.display_name)
-		inst.set("item_id", item.id)
-		inst.set("wearable_scene", item.scene)
-		inst.set("equip_slot", item.slot)
-		inst.set("pickup_color", item.preview_color)
-		inst.set("auto_pickup", false)
-		inst.set("require_interact", true)
-		inst.set("pickup_radius", 2.0)
-		var level = get_tree().current_scene
-		if level:
-			level.add_child(inst)
-			inst.global_position = spawn_pos
-			print("[InventoryUI] Spawned pickup in world at: ", spawn_pos)
-
-# ───────────────────────────────────────────────────
-#  Equip / Unequip Logic
-# ───────────────────────────────────────────────────
-
-func _on_socket_equipped(slot: int, item: ItemData) -> void:
-	if equipment == null or inventory == null:
-		return
-	if slot == ItemData.EquipSlot.HAND:
-		return
-
-	if item.scene == null:
-		return
-	# Free the HAND first: the item being equipped leaves it, which makes room for
-	# the piece it replaces (adding first would fail because the hand is full).
-	var old_data: ItemData = null
-	var old_wearable = equipment.get_equipped(slot)
-	if old_wearable and is_instance_valid(old_wearable):
-		old_data = _find_item_data_for_wearable(old_wearable, slot)
-	inventory.remove_item(item)
-	var wearable = equipment.equip_wearable(item.scene, slot, item.bone_name)
-	if wearable == null:
-		inventory.add_item(item)
-		push_warning("[InventoryUI] Failed to equip '%s'" % item.display_name)
-		_refresh_sockets()
-		return
-	if slot == ItemData.EquipSlot.CAPE and player and "cloak" in player:
-		player.set("cloak", wearable)
-		if wearable.has_method("set_color") and "cloak_color" in player:
-			wearable.set_color(player.get("cloak_color"))
-	if old_data:
-		inventory.add_item(old_data)
-	print("[InventoryUI] Equipped '%s' in slot %d" % [item.display_name, slot])
-
-	_refresh_sockets()
-
-func _on_socket_unequipped(slot: int, item: ItemData) -> void:
-	if equipment == null or inventory == null:
-		return
-	if slot == ItemData.EquipSlot.HAND:
-		return
-
-	equipment.unequip_slot(slot)
-	if slot == ItemData.EquipSlot.CAPE and player and "cloak" in player:
-		player.set("cloak", null)
-
-	inventory.add_item(item)
-	print("[InventoryUI] Unequipped '%s' from slot %d" % [item.display_name, slot])
-
+# Right-click the HAND ring: drop the held item into the world (same as a light G throw)
+func _on_hand_right_clicked(_item: ItemData) -> void:
+	player.drop_held_item()
 	_refresh_sockets()
 
 # ───────────────────────────────────────────────────

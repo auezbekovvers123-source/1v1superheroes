@@ -729,8 +729,8 @@ func _place_buildings_in_sections(sections: Array, building_models: Array, grid_
 			# unrotated footprint), so non-square footprints don't pick a side
 			# they no longer touch after the 90/270 swap ("some line up").
 			var street_side = _nearest_street_side(try_pos, section)
-			var rotation_degrees = _rotation_for_street_side(street_side)
-			var rotated_size = _get_rotated_size(Vector2i(width, depth), rotation_degrees)
+			var rot_deg = _rotation_for_street_side(street_side)
+			var rotated_size = _get_rotated_size(Vector2i(width, depth), rot_deg)
 			# Street wall: slide the road-facing edge flush to the block edge
 			# so fronts share one line. Fall back to the sampled tile if the
 			# flush spot is taken (keeps density, lines up when possible).
@@ -746,7 +746,7 @@ func _place_buildings_in_sections(sections: Array, building_models: Array, grid_
 				continue
 			if _is_global_area_occupied(place_pos, rotated_size, building_spacing_tiles):
 				continue
-			var building = _create_building_instance(place_pos, Vector2i(width, depth), rotated_size, rotation_degrees, model_info)
+			var building = _create_building_instance(place_pos, Vector2i(width, depth), rotated_size, rot_deg, model_info)
 			all_buildings.append(building)
 			# Store FOOTPRINT rect (gap enforced at query time).
 			section.occupied_rects.append(Rect2(place_pos.x, place_pos.y, rotated_size.x, rotated_size.y))
@@ -770,8 +770,8 @@ func _shuffle_array(array: Array):
 		array[i] = array[j]
 		array[j] = temp
 
-func _get_rotated_size(original_size: Vector2i, rotation_degrees: float) -> Vector2i:
-	var rot_normalized = int(rotation_degrees) % 360
+func _get_rotated_size(original_size: Vector2i, rot_deg: float) -> Vector2i:
+	var rot_normalized = int(rot_deg) % 360
 	if rot_normalized == 90 or rot_normalized == 270:
 		return Vector2i(original_size.y, original_size.x)
 	return original_size
@@ -837,7 +837,7 @@ func _flush_pos_to_street(pos: Vector2i, rotated_size: Vector2i, section: Sectio
 			return Vector2i(pos.x, z0 + h - rotated_size.y)
 	return pos
 
-func _get_road_facing_rotation(pos: Vector2i, size: Vector2i, section: Section) -> float:
+func _get_road_facing_rotation(pos: Vector2i, _size: Vector2i, section: Section) -> float:
 	# Kept for API compatibility – now size-independent so the picked side
 	# stays valid after the 90/270 footprint swap.
 	return _rotation_for_street_side(_nearest_street_side(pos, section))
@@ -870,10 +870,10 @@ func _validate_buildings_on_grid(buildings: Array, grid_data: Dictionary) -> int
 		var unwound = fmod(b.rotation_y - building_front_offset_degrees, 360.0)
 		if unwound < 0.0:
 			unwound += 360.0
-		var snapped = roundf(unwound / 90.0) * 90.0
-		if absf(unwound - snapped) > 0.01:
+		var snapped_rot = roundf(unwound / 90.0) * 90.0
+		if absf(unwound - snapped_rot) > 0.01:
 			push_warning("[CityGenerator] Building %s yaw %.1f not cardinal – snapping" % [str(b.model_name), b.rotation_y])
-			b.rotation_y = fmod(snapped + building_front_offset_degrees, 360.0)
+			b.rotation_y = fmod(snapped_rot + building_front_offset_degrees, 360.0)
 			bad += 1
 	if bad > 0:
 		push_warning("[CityGenerator] Grid audit: %d building issues (see above)" % bad)
@@ -924,7 +924,7 @@ func _is_global_area_occupied(pos: Vector2i, size: Vector2i, spacing: int) -> bo
 				return true
 	return false
 
-func _mark_global_area_occupied(pos: Vector2i, size: Vector2i, spacing: int = -1):
+func _mark_global_area_occupied(pos: Vector2i, size: Vector2i, _spacing: int = -1):
 	# Footprints only (spacing enforced at query). Extra spacing arg kept for
 	# API compatibility but ignored – gap lives in the query, not the mark.
 	for dx in range(size.x):
@@ -932,14 +932,14 @@ func _mark_global_area_occupied(pos: Vector2i, size: Vector2i, spacing: int = -1
 			var p = pos + Vector2i(dx, dz)
 			_global_occupied_tiles[p] = true
 
-func _create_building_instance(grid_pos: Vector2i, original_size: Vector2i, rotated_size: Vector2i, rotation: float, model_info: Dictionary) -> BuildingInfo:
+func _create_building_instance(grid_pos: Vector2i, original_size: Vector2i, rotated_size: Vector2i, rot_y: float, model_info: Dictionary) -> BuildingInfo:
 	var building = BuildingInfo.new()
 	building.model_path = model_info.path
 	building.model_name = model_info.name
 	building.size_tiles = original_size
 	building.rotated_size = rotated_size
 	building.grid_position = grid_pos
-	building.rotation_y = rotation
+	building.rotation_y = rot_y
 	# Mesh-aware scale: fit visual inside logical footprint, never overflow.
 	# v1 clamped the minimum UP to 0.85, so oversized meshes overlapped
 	# neighbours and looked "weird". Now we shrink to fit when needed.

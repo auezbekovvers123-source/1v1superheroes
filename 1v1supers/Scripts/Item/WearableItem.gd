@@ -11,7 +11,6 @@ class_name WearableItem
 @export var mesh_offset: Vector3 = Vector3.ZERO
 @export var mesh_rotation_deg: Vector3 = Vector3.ZERO
 @export var mesh_scale: Vector3 = Vector3.ONE
-@export var auto_find_skeleton: bool = true
 
 var _mesh_instance: MeshInstance3D = null
 var _is_equipped: bool = false
@@ -20,9 +19,6 @@ func _ready() -> void:
 	# Ensure default bone if not set (inherited from BoneAttachment3D)
 	if use_bone_attachment and (bone_name == null or bone_name == ""):
 		bone_name = "spine_03.x"
-	if auto_find_skeleton and get_parent() is not Skeleton3D:
-		# Delay one frame to let parent skeleton be ready, then warn if not attached correctly
-		pass
 	_mesh_instance = _find_mesh_instance()
 	if _mesh_instance:
 		_mesh_instance.position = mesh_offset
@@ -52,8 +48,7 @@ func equip(to_skeleton: Skeleton3D, target_bone: String = "") -> bool:
 		push_warning("[WearableItem] equip failed: skeleton is null")
 		return false
 	var bname: String = target_bone if target_bone != "" else bone_name
-	var bone_idx: int = to_skeleton.find_bone(bname)
-	if bone_idx == -1:
+	if to_skeleton.find_bone(bname) == -1:
 		push_warning("[WearableItem] bone '%s' not found on skeleton. Available: %d bones" % [bname, to_skeleton.get_bone_count()])
 		return false
 	# Reparent under skeleton if needed
@@ -66,13 +61,11 @@ func equip(to_skeleton: Skeleton3D, target_bone: String = "") -> bool:
 	bone_name = bname
 	_is_equipped = true
 	visible = true
-	print("[WearableItem] Equipped '%s' on bone '%s' (%d)" % [item_name, bname, bone_idx])
 	return true
 
 func unequip() -> void:
 	visible = false
 	_is_equipped = false
-	print("[WearableItem] Unequipped '%s'" % item_name)
 
 func is_equipped() -> bool:
 	return _is_equipped and visible
@@ -83,19 +76,3 @@ func set_color(col: Color) -> void:
 		(mi.material_override as ShaderMaterial).set_shader_parameter("color", col)
 	elif mi and mi.get_surface_override_material(0) is ShaderMaterial:
 		(mi.get_surface_override_material(0) as ShaderMaterial).set_shader_parameter("color", col)
-
-# ---------------- Powers (generic worn-item abilities) ----------------
-# ItemData.power_id declares the power (e.g. cape -> "fly").
-# Wearables override get_power_id() when the power differs from item_id mapping.
-# Player.gd polls Equipment.has_power() and calls activate/deactivate via the owner.
-func get_power_id() -> String:
-	return ""
-
-func can_activate_power(_player: Node) -> bool:
-	return true
-
-func activate_power(_player: Node) -> bool:
-	return false
-
-func deactivate_power(_player: Node) -> void:
-	pass
