@@ -9,7 +9,8 @@ class_name RagdollController
 @export var capsule_radius_scale: float = 1.0
 @export var keep_simulating_on_respawn: bool = false
 @export var auto_find_skeleton: bool = true
-@export var impulse_multiplier: float = 1.35
+@export var impulse_multiplier: float = 1.0 # scales every death launch
+@export var death_impulse: float = 7.0 # launch strength when the killing blow had no knockback
 @export var debug_log: bool = false
 
 var skeleton: Skeleton3D = null
@@ -219,33 +220,32 @@ func reset_ragdoll() -> void:
 	if debug_log and _character_body:
 		print("[Ragdoll] RESET %s" % _character_body.name)
 
+## The ONLY place a death ragdoll is started. Direction/strength come from the
+## killing blow's knockback when there was one, else from the killer's position.
 func _on_health_died(killer: Node) -> void:
-	# Determine hit direction from killer
+	if _character_body == null:
+		return
+	var pos: Vector3 = _character_body.global_position + Vector3(0, 0.9, 0)
 	var dir := Vector3.ZERO
-	var pos := _character_body.global_position if _character_body else Vector3.ZERO
-	var strength := 6.0
-	if _character_body and killer is Node3D and killer != _character_body:
-		dir = (_character_body.global_position - (killer as Node3D).global_position)
-		dir.y = 0.15
+	var strength: float = death_impulse
+	var kb: Vector3 = _health.last_knockback if _health is Health else Vector3.ZERO
+	if kb.length() > 0.5:
+		dir = kb.normalized()
+		strength = kb.length() * 0.9 + 5.0
+	elif killer is Node3D and killer != _character_body:
+		dir = _character_body.global_position - (killer as Node3D).global_position
+		dir.y = 0.2
 		if dir.length() < 0.1:
 			dir = Vector3.FORWARD
 		dir = dir.normalized()
-		pos = _character_body.global_position + Vector3(0, 0.9, 0)
-		# try to get last knockback from health meta or use strength based on last damage
-		if _health and _health.get("current") != null:
-			pass
-		# use killer velocity if available
 		if killer is CharacterBody3D:
 			var kv: Vector3 = (killer as CharacterBody3D).velocity
 			if kv.length() > 1.0:
-				dir = (dir + kv.normalized() * 0.6).normalized()
+				dir = (dir + kv.normalized() * 0.5).normalized()
 				strength += kv.length() * 0.25
 	else:
-		dir = Vector3(randf_range(-1,1), 0.2, randf_range(-1,1)).normalized()
-		if _character_body:
-			pos = _character_body.global_position
-	strength *= impulse_multiplier
-	start_ragdoll(dir, pos, strength)
+		dir = Vector3(randf_range(-1, 1), 0.2, randf_range(-1, 1)).normalized()
+	start_ragdoll(dir, pos, strength * impulse_multiplier)
 
 func _on_health_changed(_cur: float, _max: float) -> void:
 	pass

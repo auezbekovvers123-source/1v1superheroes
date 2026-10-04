@@ -114,8 +114,8 @@ func _ensure_sockets() -> void:
 	_create_socket(1, "spine_03.x", Vector3(0.0, 0.48, -0.05), Vector3(0.0, 1.76, 0.0), 0.10)
 	_create_socket(2, "spine_03.x", Vector3(0.0, 0.30, 0.06), Vector3(0.0, 1.58, 0.05), 0.10)
 	_create_socket(3, "spine_02.x", Vector3(0.0, 0.05, 0.12), Vector3(0.0, 1.25, 0.12), 0.10)
-	_create_socket(5, "hand_l.x", Vector3(0.0, 0.0, 0.0), Vector3(0.38, 0.85, 0.02), 0.09)
-	_create_socket(4, "foot_r.x", Vector3(0.0, 0.0, 0.05), Vector3(0.18, 0.10, 0.08), 0.09)
+	_create_socket(5, "hand.l", Vector3(0.0, 0.0, 0.0), Vector3(0.38, 0.85, 0.02), 0.09)
+	_create_socket(4, "foot.r", Vector3(0.0, 0.0, 0.05), Vector3(0.18, 0.10, 0.08), 0.09)
 	_create_socket(6, "hand.r", Vector3(0.02, -0.02, 0.06), Vector3(0.42, 0.92, 0.08), 0.12)
 
 func _create_socket(slot_id: int, preferred_bone: String, bone_offset: Vector3, fallback_pos: Vector3, world_radius: float) -> void:
@@ -483,26 +483,28 @@ func _on_socket_equipped(slot: int, item: ItemData) -> void:
 	if slot == ItemData.EquipSlot.HAND:
 		return
 
+	if item.scene == null:
+		return
+	# Free the HAND first: the item being equipped leaves it, which makes room for
+	# the piece it replaces (adding first would fail because the hand is full).
+	var old_data: ItemData = null
 	var old_wearable = equipment.get_equipped(slot)
 	if old_wearable and is_instance_valid(old_wearable):
-		var old_data := _find_item_data_for_wearable(old_wearable, slot)
-		equipment.unequip_slot(slot)
-		if old_data:
-			inventory.add_item(old_data)
-
+		old_data = _find_item_data_for_wearable(old_wearable, slot)
 	inventory.remove_item(item)
-
-	if item.scene:
-		var wearable = equipment.equip_wearable(item.scene, slot, item.bone_name)
-		if wearable:
-			if slot == ItemData.EquipSlot.CAPE and player and "cloak" in player:
-				player.set("cloak", wearable)
-				if wearable.has_method("set_color") and "cloak_color" in player:
-					wearable.set_color(player.get("cloak_color"))
-			print("[InventoryUI] Equipped '%s' in slot %d" % [item.display_name, slot])
-		else:
-			inventory.add_item(item)
-			push_warning("[InventoryUI] Failed to equip '%s'" % item.display_name)
+	var wearable = equipment.equip_wearable(item.scene, slot, item.bone_name)
+	if wearable == null:
+		inventory.add_item(item)
+		push_warning("[InventoryUI] Failed to equip '%s'" % item.display_name)
+		_refresh_sockets()
+		return
+	if slot == ItemData.EquipSlot.CAPE and player and "cloak" in player:
+		player.set("cloak", wearable)
+		if wearable.has_method("set_color") and "cloak_color" in player:
+			wearable.set_color(player.get("cloak_color"))
+	if old_data:
+		inventory.add_item(old_data)
+	print("[InventoryUI] Equipped '%s' in slot %d" % [item.display_name, slot])
 
 	_refresh_sockets()
 

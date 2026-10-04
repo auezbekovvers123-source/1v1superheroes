@@ -16,11 +16,15 @@ signal health_changed(current: float, max_val: float)
 const PUNCH_HIT_SOUND: AudioStream = preload("res://Assets/Sounds/Punch/Punch.mp3")
 const KICK_HIT_SOUND: AudioStream = preload("res://Assets/Sounds/Punch/Kick.mp3")
 
+## Fraction of the hit velocity a body gets back when its hitstop freeze ends.
+## Combat knockback values are tuned with this factor in mind.
+const KNOCKBACK_AFTER_HITSTOP: float = 0.4
+
 var current: float = 100.0
 var is_dead: bool = false
 var _invuln_timer: float = 0.0
 var _flash_tween: Tween
-var _last_knockback: Vector3 = Vector3.ZERO
+var last_knockback: Vector3 = Vector3.ZERO
 var _last_hit_dir: Vector3 = Vector3.ZERO
 
 @onready var _owner_body: CharacterBody3D = get_parent() as CharacterBody3D
@@ -42,11 +46,11 @@ func can_take_damage() -> bool:
 func take_damage(amount: float, from: Node = null, knockback: Vector3 = Vector3.ZERO, hitstop: float = 0.0, shake: float = 0.0) -> bool:
 	if not can_take_damage():
 		return false
-	current -= amount
+	current = maxf(current - amount, 0.0)
 	_invuln_timer = invuln_time
 	health_changed.emit(current, max_health)
 	var is_crit := amount >= 18.0
-	_last_knockback = knockback
+	last_knockback = knockback
 	_last_hit_dir = knockback.normalized() if knockback.length() > 0.01 else Vector3.ZERO
 	var is_ragdolled: bool = false
 	if _owner_body and _owner_body.has_node("RagdollController"):
@@ -60,8 +64,6 @@ func take_damage(amount: float, from: Node = null, knockback: Vector3 = Vector3.
 		is_anchored = true
 	if _owner_body and knockback != Vector3.ZERO and not is_ragdolled and not is_anchored:
 		_owner_body.velocity += knockback
-		# brief stun: add meta
-		_owner_body.set_meta("stun_time", 0.22 if is_crit else 0.14)
 	damaged.emit(amount, from, knockback, is_crit)
 	_do_flash(is_crit)
 	_do_hitstop(hitstop)
@@ -75,8 +77,6 @@ func take_damage(amount: float, from: Node = null, knockback: Vector3 = Vector3.
 		_do_death_effect(from)
 	else:
 		_spawn_hit_feedback(amount, from, is_crit)
-	if shake > 0.0 and from and from.has_method("get_camera_shake_source"):
-		pass
 	return true
 
 func heal(amount: float) -> void:
@@ -96,16 +96,14 @@ func _do_hitstop(duration: float) -> void:
 	var body: CharacterBody3D = _owner_body
 	if body == null:
 		return
+	# Hold the hit velocity back for the freeze, then hand it back scaled down.
+	# It is ADDED on release, so whatever the body did during the freeze (gravity,
+	# landing, another hit) is kept instead of being overwritten.
 	var saved_vel: Vector3 = body.velocity
 	body.velocity = Vector3.ZERO
-	# Also brief attacker-stuck visual: small lunge freeze via meta (read by Player._physics_process)
-	if body.has_meta("hit_confirm"):
-		body.set_meta("hitstop_remaining", duration)
 	await Engine.get_main_loop().create_timer(duration, true, false, true).timeout
 	if is_instance_valid(body):
-		body.velocity = saved_vel * 0.4 # return with damping, not full snap-back
-		if body.has_meta("hitstop_remaining"):
-			body.remove_meta("hitstop_remaining")
+		body.velocity += saved_vel * KNOCKBACK_AFTER_HITSTOP
 
 func _do_flash(is_crit: bool) -> void:
 	var body = get_parent()
@@ -202,7 +200,7 @@ func _spawn_hit_feedback(amount: float, from: Node, is_crit: bool) -> void:
 	pm.albedo_color = Color(1.0, 0.85, 0.2) if is_crit else Color(1.0, 0.45, 0.15)
 	pm.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
 	quad.material = pm
-	body.get_tree().current_scene.add_child(particles)
+	_effects_parent(body).add_child(particles)
 	particles.global_position = body.global_position + Vector3(0, 1.0, 0) + Vector3(randf_range(-0.2, 0.2), 0, randf_range(-0.2, 0.2))
 	particles.emitting = true
 	# Auto free
@@ -211,6 +209,11 @@ func _spawn_hit_feedback(amount: float, from: Node, is_crit: bool) -> void:
 	# Screen shake on owner? handled by attacker
 	# Hit sound: pick Punch.mp3 vs Kick.mp3 based on attacker's current attack anim.
 	_play_hit_sound(body, amount, is_crit, from)
+
+## Where transient hit effects go: the current scene, or the root when there is none (tests/tools).
+func _effects_parent(n: Node) -> Node:
+	var tree := n.get_tree()
+	return tree.current_scene if tree.current_scene else tree.root
 
 func _is_kick_attack(from: Node) -> bool:
 	if from == null:
@@ -252,7 +255,7 @@ func _play_hit_sound(at: Node3D, amount: float, is_crit: bool, from: Node = null
 		base_db += 2.0
 	base_db += (clampf(amount, 0.0, 30.0) / 22.0) * 3.0
 	player.volume_db = base_db
-	at.get_tree().current_scene.add_child(player)
+	_effects_parent(at).add_child(player)
 	player.global_position = at.global_position + Vector3(0, 1.0, 0)
 	player.play()
 	# Free after the stream length + a small tail (use the actual stream length if available)
@@ -293,7 +296,7 @@ func _do_death_effect(_killer: Node) -> void:
 				return
 			current = max_health
 			is_dead = false
-			_last_knockback = Vector3.ZERO
+			last_knockback = Vector3.ZERO
 			if body.has_method("respawn"):
 				body.respawn()
 			else:
@@ -314,7 +317,7 @@ func _do_death_effect(_killer: Node) -> void:
 				return
 			current = max_health
 			is_dead = false
-			_last_knockback = Vector3.ZERO
+			last_knockback = Vector3.ZERO
 			if body.has_method("_respawn_after_death"):
 				body.call("_respawn_after_death")
 			else:

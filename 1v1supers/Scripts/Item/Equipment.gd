@@ -109,11 +109,11 @@ func unequip_slot(slot: int) -> void:
 	var item: WearableItem = _slots[slot] as WearableItem
 	if item and is_instance_valid(item):
 		item.unequip()
-		# Keep in tree but invisible, or free depending on preference
-		# For persistence, we hide; for demo, we keep hidden
-		item.visible = false
-	item_unequipped.emit(slot, item)
 	_slots.erase(slot)
+	item_unequipped.emit(slot, item)
+	# The item's data lives on in the Inventory/world; the worn node is not reused.
+	if item and is_instance_valid(item):
+		item.queue_free()
 
 func get_equipped(slot: int) -> WearableItem:
 	return _slots.get(slot, null)

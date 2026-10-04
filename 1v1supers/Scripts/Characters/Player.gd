@@ -40,7 +40,7 @@ var _is_fullbody_action: bool = false # kick uses full body (not filtered)
 
 # --- Upper look (walking punch) - twist spine to face target ---
 var _skeleton: Skeleton3D = null
-var _spine_bone_idx: int = -1
+var _upper_twist: UpperBodyTwist = null
 var _upper_look_weight: float = 0.0
 var _upper_look_angle: float = 0.0
 
@@ -169,7 +169,6 @@ var dash_timer: float = 0.0
 var dash_recovery_timer: float = 0.0
 var dash_direction: Vector3 = Vector3.ZERO
 var dash_anim_speed: float = 1.0
-var _dash_key_latched: bool = false
 var _dash_is_diagonal: bool = false # true if dash started from W+A/W+D/S+A/S+D
 
 @export_group("Movement")
@@ -214,7 +213,9 @@ var _footstep_prev_on_floor: bool = true # last-frame on_floor, used to detect l
 @export var ground_accel_rate: float = 12.0 # exp rate toward target velocity on ground (was fixed 0.28 lerp — snappy + fps-dependent)
 @export var air_accel_rate: float = 4.0 # exp rate toward target velocity in air (was fixed 0.16 lerp)
 @export var dash_enter_rate: float = 20.0 # exp rate into dash burst (was instant assignment)
-@export var dash_recovery_rate: float = 10.0 # exp rate from dash burst back to locomotion (was fixed 0.18 lerp)
+@export var dash_recovery_speed_start: float = 0.9 # fraction of dash_speed when recovery begins
+@export var dash_recovery_speed_end: float = 0.72 # fraction of dash_speed when recovery ends (then normal accel takes over)
+@export var dash_recovery_steer: float = 0.15 # how much movement input steers during recovery
 @export var attack_stop_rate: float = 10.0 # exp rate toward zero while fullbody-attacking (was *= 0.42 per-frame snap)
 @export var stun_stop_rate: float = 8.0 # exp rate toward zero while stunned (was *= 0.22 per-frame snap)
 @export var snap_turn_rate: float = 16.0 # exp rate for combat snap-to-target (was instant atan2 assignment)
@@ -225,6 +226,8 @@ var _footstep_prev_on_floor: bool = true # last-frame on_floor, used to detect l
 @export var turn_anim_speed: float = 1.8
 @export var turn_rotation_duration: float = 0.16 # how fast mesh tweens 90deg after anim (s)
 @export var turn_cooldown: float = 0.02 # small lock after turn to avoid double trigger
+const TURN_ROOT_BONE: String = "root.x"
+const TURN_ROOT_TRACK: String = "root/Skeleton3D:root.x"
 var _is_turning: bool = false
 var _turn_cooldown_timer: float = 0.0
 var _turn_tween: Tween = null
@@ -427,7 +430,7 @@ func _setup_ragdoll() -> void:
 		return
 	ragdoll = RagdollCls.new()
 	ragdoll.name = "RagdollController"
-	ragdoll.impulse_multiplier = 1.35
+	ragdoll.death_impulse = 7.5
 	add_child(ragdoll)
 
 func _setup_grabber() -> void:
@@ -2106,9 +2109,7 @@ func _play_attack(idx: int) -> void:
 	_has_hit_this_swing = false
 	_hit_confirm_timer = 0.0
 	_hitbox_active = false
-	# Stamina cost — kick costs more than punches
-	var atk_cost: float = stamina_kick if idx == 3 else stamina_punch
-	use_stamina(atk_cost)
+	use_stamina(_attack_stamina_cost(idx))
 	# total duration approx — punches use COMBO_SPEED (2.7), kick uses KICK_SPEED (1.35)
 	var spd: float = COMBO_SPEED if idx < 3 else KICK_SPEED
 	var len: float = c11_ap.get_animation(anim).length / spd
@@ -2302,57 +2303,36 @@ func _find_best_target(aim_dir: Vector3) -> Node3D:
 	return best
 
 func _update_upper_skeleton_look(delta: float, look_dir: Vector3) -> void:
-	var skel := _get_skeleton()
-	if skel == null:
-		return
-	if _spine_bone_idx == -1:
-		_spine_bone_idx = skel.find_bone("spine_03.x")
-		if _spine_bone_idx == -1:
-			_spine_bone_idx = skel.find_bone("spine_03")
-		if _spine_bone_idx == -1:
-			_spine_bone_idx = skel.find_bone("spine_02.x")
-		if _spine_bone_idx == -1:
-			return
 	look_dir.y = 0
-	if look_dir.length() < 0.01:
+	if look_dir.length() < 0.01 or player_mesh == null:
 		return
 	look_dir = look_dir.normalized()
-	var mesh_yaw: float = player_mesh.rotation.y
 	var target_yaw: float = atan2(look_dir.x, look_dir.z)
-	var delta_yaw: float = angle_difference(mesh_yaw, target_yaw)
-	delta_yaw = clamp(delta_yaw, deg_to_rad(-65.0), deg_to_rad(65.0))
+	var delta_yaw: float = clampf(angle_difference(player_mesh.rotation.y, target_yaw), deg_to_rad(-65.0), deg_to_rad(65.0))
 	_upper_look_angle = lerp_angle(_upper_look_angle, delta_yaw, _exp_weight(12.0, delta))
 	_upper_look_weight = lerpf(_upper_look_weight, 1.0, _exp_weight(10.0, delta))
-	var q := Quaternion(Vector3.UP, _upper_look_angle * _upper_look_weight)
-	skel.set_bone_pose_rotation(_spine_bone_idx, q)
-	# also drive neck a bit for head look
-	var neck_idx := skel.find_bone("neck.x")
-	if neck_idx != -1:
-		var nq := Quaternion(Vector3.UP, _upper_look_angle * _upper_look_weight * 0.35)
-		skel.set_bone_pose_rotation(neck_idx, nq)
+	_apply_upper_twist()
 
 func _clear_upper_skeleton_look(delta: float) -> void:
 	if _upper_look_weight <= 0.01 and _upper_look_angle == 0.0:
 		return
 	_upper_look_weight = lerpf(_upper_look_weight, 0.0, _exp_weight(12.0, delta))
 	_upper_look_angle = lerp_angle(_upper_look_angle, 0.0, _exp_weight(12.0, delta))
-	var skel := _get_skeleton()
-	if skel == null or _spine_bone_idx == -1:
-		return
 	if _upper_look_weight < 0.02:
-		skel.clear_bones_global_pose_override()
-		# reset to rest
-		skel.set_bone_pose_rotation(_spine_bone_idx, Quaternion.IDENTITY)
-		var neck_idx := skel.find_bone("neck.x")
-		if neck_idx != -1:
-			skel.set_bone_pose_rotation(neck_idx, Quaternion.IDENTITY)
-	else:
-		var q := Quaternion(Vector3.UP, _upper_look_angle * _upper_look_weight)
-		skel.set_bone_pose_rotation(_spine_bone_idx, q)
-		var neck_idx := skel.find_bone("neck.x")
-		if neck_idx != -1:
-			var nq := Quaternion(Vector3.UP, _upper_look_angle * _upper_look_weight * 0.35)
-			skel.set_bone_pose_rotation(neck_idx, nq)
+		_upper_look_weight = 0.0
+		_upper_look_angle = 0.0
+	_apply_upper_twist()
+
+## Pushes the current look angle to the skeleton modifier (added on first use).
+func _apply_upper_twist() -> void:
+	if _upper_twist == null or not is_instance_valid(_upper_twist):
+		var skel := _get_skeleton()
+		if skel == null:
+			return
+		_upper_twist = UpperBodyTwist.new()
+		_upper_twist.name = "UpperBodyTwist"
+		skel.add_child(_upper_twist)
+	_upper_twist.twist = _upper_look_angle * _upper_look_weight
 
 func _do_attack_anticipation(idx: int) -> void:
 	if player_mesh == null:
@@ -2559,39 +2539,7 @@ func _on_died(_killer: Node) -> void:
 	if grabber and grabber.is_grabbing():
 		grabber.release_grab()
 		_exit_carry_hold_state()
-	# --- GTA5 ragdoll ---
-	if ragdoll == null:
-		_setup_ragdoll()
-	if ragdoll:
-		var dir: Vector3 = Vector3.ZERO
-		var pos: Vector3 = global_position + Vector3(0, 0.9, 0)
-		var stren: float = 7.5
-		if _killer is Node3D and _killer != self:
-			dir = (global_position - (_killer as Node3D).global_position)
-			dir.y = 0.22
-			if dir.length() < 0.1:
-				dir = Vector3.FORWARD
-			dir = dir.normalized()
-			if _killer is CharacterBody3D:
-				var kv: Vector3 = (_killer as CharacterBody3D).velocity
-				if kv.length() > 1.0:
-					dir = (dir + kv.normalized()*0.5).normalized()
-					stren += kv.length() * 0.25
-		else:
-			dir = Vector3(randf_range(-1,1), 0.22, randf_range(-1,1)).normalized()
-		# Also add last knockback if available via health
-		if health and health.has_method("get") and health.get("_last_knockback") != null:
-			var kb: Vector3 = health.get("_last_knockback")
-			if kb.length() > 0.5:
-				dir = kb.normalized()
-				stren = kb.length() * 0.9 + 5.0
-		ragdoll.start_ragdoll(dir, pos, stren)
-	else:
-		# Fallback scale tween if ragdoll missing
-		if player_mesh:
-			var tw := create_tween()
-			tw.tween_property(player_mesh, "scale", Vector3(1.15, 0.75, 1.15), 0.15)
-			tw.tween_property(player_mesh, "scale", Vector3.ONE, 0.4)
+	# The ragdoll launch itself is started by RagdollController (it listens to Health.died).
 
 func _respawn_after_death() -> void:
 	if has_meta("is_being_grabbed") and bool(get_meta("is_being_grabbed")):
@@ -2657,13 +2605,6 @@ func _try_attack() -> void:
 		return # attacks blocked while flying (smart cancel spec)
 	if _is_charging_throw:
 		return # block combo while charging throw
-	# Stamina gate — kick (idx 3) costs more
-	if not has_stamina(stamina_kick):
-		print("[Combo] guard: not enough stamina for kick")
-		return
-	if not has_stamina(stamina_punch):
-		print("[Combo] guard: not enough stamina for punch")
-		return
 	# If holding usable, redirect to ITEMUSE instead of combo
 	if is_holding_item():
 		if held_item and held_item.is_usable:
@@ -2672,6 +2613,10 @@ func _try_attack() -> void:
 		else:
 			print("[HandHold] Attack blocked — holding non-usable '%s'" % held_item.display_name)
 			return
+	# Stamina gate — check the cost of the swing this press would start (the kick costs more)
+	var next_idx: int = 0 if not is_attacking else mini(combo_index + 1, COMBO_ANIMS.size() - 1)
+	if not has_stamina(_attack_stamina_cost(next_idx)):
+		return
 	var now := Time.get_ticks_msec()
 	if now - _last_try_msec < 70:
 		return
@@ -2695,26 +2640,11 @@ func _try_attack() -> void:
 		_play_attack(0)
 		return
 	if combo_index < COMBO_ANIMS.size() - 1:
-		# Queue window: allow at any time after 15% but earlier queue = buffered, later = immediate
-		var can_queue := true
-		var prog: float = 0.0
-		if use_layered_anims and animator and animator.active:
-			if _attack_total > 0.0:
-				prog = _attack_timer / _attack_total
-				if prog < 0.15:
-					can_queue = false
-		else:
-			if c11_ap.current_animation_length > 0.0:
-				prog = c11_ap.current_animation_position / c11_ap.current_animation_length
-				if prog < 0.15:
-					can_queue = false
-		# If hit confirmed, allow instant queue even earlier
-		if _has_hit_this_swing and prog < 0.15:
-			can_queue = true
-		if can_queue:
-			combo_queued = true
-		else:
-			combo_queued = true
+		# Buffer the next swing; it starts when the current one finishes
+		combo_queued = true
+
+func _attack_stamina_cost(idx: int) -> float:
+	return stamina_kick if idx == COMBO_ANIMS.size() - 1 else stamina_punch
 
 func _check_camera_turn() -> void:
 	if is_flying:
@@ -2866,7 +2796,7 @@ func _get_turn_step(anim: String, dir: int) -> float:
 		var a: Animation = c11_ap.get_animation(anim)
 		for i in range(a.get_track_count()):
 			var path: String = str(a.track_get_path(i))
-			if path == "root/Skeleton3D:root.x" and a.track_get_type(i) == Animation.TYPE_ROTATION_3D:
+			if path == TURN_ROOT_TRACK and a.track_get_type(i) == Animation.TYPE_ROTATION_3D:
 				var cnt: int = a.track_get_key_count(i)
 				if cnt >= 2:
 					var q0: Quaternion = a.track_get_key_value(i, 0)
@@ -2915,14 +2845,15 @@ func _bake_turn_skeleton_yaw_into_mesh() -> void:
 	var skel := _get_skeleton()
 	if skel == null:
 		return
-	var bone_idx: int = skel.find_bone("root")
+	# The turn clips rotate the "root.x" bone (see _get_turn_step); its parent (c_traj)
+	# is identity, so the bone's local yaw equals the visual yaw the turn has applied.
+	var bone_idx: int = skel.find_bone(TURN_ROOT_BONE)
 	if bone_idx < 0:
 		return
-	# Yaw the turn anim applied so far = current pose relative to the rest pose
-	var q_rest: Quaternion = skel.get_bone_rest(bone_idx).basis.get_rotation_quaternion()
-	var q_now: Quaternion = skel.get_bone_pose_rotation(bone_idx)
-	var rel: Quaternion = q_rest.inverse() * q_now
-	player_mesh.rotation.y += rel.get_euler().y
+	# Measured from the rest pose: that is where the root sits once the turn is aborted.
+	var yaw_rest: float = skel.get_bone_rest(bone_idx).basis.get_euler().y
+	var yaw_now: float = skel.get_bone_pose_rotation(bone_idx).get_euler().y
+	player_mesh.rotation.y += angle_difference(yaw_rest, yaw_now)
 
 
 func _on_c11_animation_finished(anim_name: String) -> void:
@@ -2978,7 +2909,7 @@ func _on_c11_animation_finished(anim_name: String) -> void:
 	if hitbox_kick: hitbox_kick.set("active", false)
 	_hitbox_active = false
 	_lunge_velocity = Vector3.ZERO
-	if combo_queued and combo_index < COMBO_ANIMS.size() - 1:
+	if combo_queued and combo_index < COMBO_ANIMS.size() - 1 and has_stamina(_attack_stamina_cost(combo_index + 1)):
 		_play_attack(combo_index + 1)
 	else:
 		if anim_name == COMBO_ANIMS[combo_index]:
@@ -3207,33 +3138,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			if try_activate_equipped_power():
 				get_viewport().set_input_as_handled()
 			return
-	# Dash on Ctrl. Try multiple keycode paths because Ctrl can come through as either
-	# physical_keycode (4194322 = KEY_LEFT_CTRL) or keycode depending on layout/OS.
-	if event is InputEventKey and event.pressed and not event.echo:
-		var kc: int = event.keycode
-		var pkc: int = event.physical_keycode
-		# Known modifier keycodes:
-		#   4194322 = KEY_LEFT_CTRL, 4194323 = KEY_RIGHT_CTRL
-		#   4194326 = KEY_META (Win/Cmd key) — also reported as Ctrl on some systems
-		#   4194306 = KEY_CTRL (some Godot versions)
-		var is_ctrl: bool = (pkc == 4194322 or pkc == 4194323 or pkc == 4194326
-			or kc == 4194322 or kc == 4194323 or kc == 4194326 or kc == 4194306)
-		if is_ctrl:
-			# Rising-edge latch so holding Ctrl doesn't re-fire dash every frame
-			if not _dash_key_latched:
-				_dash_key_latched = true
-				if _try_dash():
-					get_viewport().set_input_as_handled()
-				else:
-					print("[Dash] _try_dash returned false")
-	# Clear latch on key release so next press re-triggers
-	if event is InputEventKey and not event.pressed:
-		var kc2: int = event.keycode
-		var pkc2: int = event.physical_keycode
-		var is_ctrl_release: bool = (pkc2 == 4194322 or pkc2 == 4194323 or pkc2 == 4194326
-			or kc2 == 4194322 or kc2 == 4194323 or kc2 == 4194326 or kc2 == 4194306)
-		if is_ctrl_release:
-			_dash_key_latched = false
+	# Dash (Ctrl) is read from the "dash" action in _physics_process.
 	if event is InputEventKey and event.pressed and not event.echo:
 		# KEY_QUOTELEFT is the ` key, KEY_ASCIITILDE is ~ (shift+`), also check unicode 96 (`) and 126 (~)
 		if event.keycode == KEY_QUOTELEFT or event.keycode == KEY_ASCIITILDE or event.physical_keycode == 96 or event.unicode == 96 or event.unicode == 126:
@@ -3241,7 +3146,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 			return
 		# Grab ragdoll / Pick up item with F (grab takes priority) — when holding usable, F triggers USE
-		if event.keycode == KEY_F:
+		if event.is_action_pressed("interact"):
 			if is_holding_item() and held_item and held_item.is_usable:
 				if try_use_held_item():
 					get_viewport().set_input_as_handled()
@@ -3484,22 +3389,8 @@ func _physics_process(delta: float) -> void:
 			return
 	if Input.is_action_just_pressed("punch") and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_try_attack()
-	# Dash trigger — InputMap action + raw Ctrl keycode fallback (4194322 = KEY_LEFT_CTRL, 4194323 = KEY_RIGHT_CTRL)
-	var dash_pressed: bool = false
+	# Dash trigger — the "dash" action (Ctrl)
 	if Input.is_action_just_pressed("dash") and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		dash_pressed = true
-	if not dash_pressed:
-		# Polled Ctrl/Meta fallback: works even if InputMap action isn't registered yet (no editor restart)
-		# 4194322 = KEY_LEFT_CTRL, 4194323 = KEY_RIGHT_CTRL, 4194326 = KEY_META (some systems)
-		var ctrl_held: bool = Input.is_key_pressed(4194322) or Input.is_key_pressed(4194323) or Input.is_key_pressed(4194326)
-		if ctrl_held:
-			if not _dash_key_latched:
-				_dash_key_latched = true
-				if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-					dash_pressed = true
-		else:
-			_dash_key_latched = false
-	if dash_pressed:
 		_try_dash()
 	# ---- Throw charge update (hold G) — progressive shake 1% light .. 100% stronger ----
 	if _is_charging_throw:
@@ -3551,9 +3442,6 @@ func _physics_process(delta: float) -> void:
 		var cancel_by_punch := Input.is_action_just_pressed("punch")
 		var cancel_by_jump := Input.is_action_just_pressed("jump")
 		var cancel_by_dash := Input.is_action_just_pressed("dash")
-		# Also raw Ctrl keys for dash
-		if not cancel_by_dash:
-			cancel_by_dash = Input.is_key_pressed(4194322) or Input.is_key_pressed(4194323)
 		if has_move_input or cancel_by_punch or cancel_by_jump or cancel_by_dash:
 			_cancel_turn()
 	# Check 45deg camera turn threshold -> triggers Turn_left/Turn_right
@@ -3654,13 +3542,13 @@ func _physics_process(delta: float) -> void:
 		# Dash bypasses normal locomotion lerp entirely
 		pass
 	elif dash_recovery_timer > 0.0:
-		# Brief slowdown before full control returns — still biased to dash dir
-		var decay: float = clampf(1.0 - (delta / maxf(dash_recovery, 0.001)), 0.0, 1.0)
-		var recovery_speed: float = dash_speed * decay
-		# Blend back to target locomotion — exponential, no fixed-step snap
-		var rec_w: float = _exp_weight(dash_recovery_rate, delta)
-		velocity.x = lerpf(dash_direction.x * recovery_speed, target_x, rec_w)
-		velocity.z = lerpf(dash_direction.z * recovery_speed, target_z, rec_w)
+		# Brief slowdown before full control returns — still biased to dash dir.
+		# Speed eases linearly from start to end ratio over dash_recovery seconds
+		# (time-based, so the dash covers the same distance at any physics tick rate).
+		var rec_t: float = clampf(1.0 - dash_recovery_timer / maxf(dash_recovery, 0.001), 0.0, 1.0)
+		var recovery_speed: float = dash_speed * lerpf(dash_recovery_speed_start, dash_recovery_speed_end, rec_t)
+		velocity.x = dash_direction.x * recovery_speed + target_x * dash_recovery_steer
+		velocity.z = dash_direction.z * recovery_speed + target_z * dash_recovery_steer
 	else:
 		if is_on_floor():
 			velocity.x = _smooth_vel_axis(velocity.x, target_x, ground_accel_rate, delta)

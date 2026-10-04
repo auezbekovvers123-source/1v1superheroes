@@ -132,10 +132,7 @@ func _try_hit_health(health: Node) -> void:
 		_on_successful_hit(target_body, null, kb)
 
 func _on_successful_hit(target: Node, _hurtbox: Area3D, _kb: Vector3) -> void:
-	# Attacker feedback: hitstop already in Health, but also do subtle attacker pause
-	if _owner_body:
-		# Add slight forward stick
-		_owner_body.set_meta("hit_confirm", true)
+	# Attacker feedback: hitstop already in Health
 	# Camera shake via attacker pivot
 	var pivot = _owner_body.get_node_or_null("SpringArmPivot") if _owner_body else null
 	if pivot and pivot.has_method("add_trauma"):

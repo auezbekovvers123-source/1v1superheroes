@@ -2,6 +2,7 @@ extends CharacterBody3D
 const HealthCls = preload("res://Scripts/Combat/Health.gd")
 const HurtboxCls = preload("res://Scripts/Combat/Hurtbox3D.gd")
 const RagdollCls = preload("res://Scripts/Combat/RagdollController.gd")
+const HEALTH_BAR_SHADER = preload("res://Assets/Shaders/health_bar.gdshader")
 ## Dummy.gd — training dummy / opponent. Takes hits satisfyingly, shows health bar, respawns.
 ## Shares C11 model for visual parity. No input — gravity + knockback + stun + flinch.
 
@@ -19,8 +20,8 @@ var _stun_timer: float = 0.0
 var _respawn_pos: Vector3
 var _respawn_yaw: float = 0.0
 var _mesh: Node3D
-var _health_bar: ProgressBar
-var _bar_host: Control
+var _health_bar: MeshInstance3D
+var _health_bar_mat: ShaderMaterial
 var _respawn_lock: float = 0.0
 var _anchor_timer: float = 0.0
 
@@ -56,7 +57,6 @@ func _setup_ragdoll() -> void:
 		return
 	ragdoll = RagdollCls.new()
 	ragdoll.name = "RagdollController"
-	ragdoll.impulse_multiplier = 1.45
 	add_child(ragdoll)
 
 func _setup_health() -> void:
@@ -119,64 +119,34 @@ func _play(anim: String, blend: float = 0.12) -> void:
 func _setup_health_bar() -> void:
 	if not show_health_bar:
 		return
-	# World-space billboard health bar using SubViewport + Sprite3D (cheap)
-	# For simplicity, use a 3D ProgressBar via Control + Sprite technique: just add a CanvasLayer UI?
-	# Instead create a Billboard Sprite3D that scales with health via code-spawned UI
-	var bar_root := Node3D.new()
-	bar_root.name = "HealthBarRoot"
-	add_child(bar_root)
-	bar_root.position = Vector3(0, 2.05, 0)
-	var bg := MeshInstance3D.new()
-	var bg_mesh := PlaneMesh.new()
-	bg_mesh.size = Vector2(1.4, 0.16)
-	bg.mesh = bg_mesh
-	var bg_mat := StandardMaterial3D.new()
-	bg_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	bg_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	bg_mat.albedo_color = Color(0.08, 0.08, 0.08, 0.82)
-	bg_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
-	bg.material_override = bg_mat
-	bar_root.add_child(bg)
-	bg.position = Vector3(0, 0, 0)
-	var fg := MeshInstance3D.new()
-	fg.name = "FG"
-	var fg_mesh := PlaneMesh.new()
-	fg_mesh.size = Vector2(1.34, 0.11)
-	fg.mesh = fg_mesh
-	var fg_mat := StandardMaterial3D.new()
-	fg_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	fg_mat.albedo_color = Color(0.18, 1.0, 0.35, 0.95)
-	fg_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
-	fg.material_override = fg_mat
-	bar_root.add_child(fg)
-	fg.position = Vector3(0, 0, 0.01)
-	_health_bar = null # we use fg scale
-	# Store refs via meta
-	bar_root.set_meta("bg", bg)
-	bar_root.set_meta("fg", fg)
-	bar_root.set_meta("fg_mat", fg_mat)
+	# One camera-facing quad; the shader draws background + fill (see health_bar.gdshader).
+	var bar := MeshInstance3D.new()
+	bar.name = "HealthBar"
+	var quad := QuadMesh.new()
+	quad.size = Vector2(1.4, 0.16)
+	bar.mesh = quad
+	bar.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_health_bar_mat = ShaderMaterial.new()
+	_health_bar_mat.shader = HEALTH_BAR_SHADER
+	bar.material_override = _health_bar_mat
+	add_child(bar)
+	bar.position = Vector3(0, 2.05, 0)
+	bar.visible = false
+	_health_bar = bar
 
 func _update_health_bar() -> void:
-	var root = get_node_or_null("HealthBarRoot") as Node3D
-	if root == null or health == null:
+	if _health_bar == null or health == null:
 		return
-	var fg = root.get_node_or_null("FG") as MeshInstance3D
-	if fg == null:
-		return
-	var fg_mat = root.get_meta("fg_mat") as StandardMaterial3D
-	var pct: float = clamp(health.current / health.max_health, 0.0, 1.0)
-	fg.scale.x = pct
-	fg.position.x = -(1.34 * (1.0 - pct)) * 0.5 # keep left anchored
-	if fg_mat:
-		if pct > 0.55:
-			fg_mat.albedo_color = Color(0.18, 1.0, 0.35, 0.95)
-		elif pct > 0.28:
-			fg_mat.albedo_color = Color(1.0, 0.85, 0.15, 0.95)
-		else:
-			fg_mat.albedo_color = Color(1.0, 0.22, 0.22, 0.95)
-	# Hide when full, show when damaged for 3s
-	root.visible = pct < 0.999
-	# Billboard: keep facing camera is via material, root yaw auto? material does it
+	var pct: float = clampf(health.current / health.max_health, 0.0, 1.0)
+	_health_bar_mat.set_shader_parameter("fill", pct)
+	var col := Color(0.18, 1.0, 0.35, 0.95)
+	if pct <= 0.28:
+		col = Color(1.0, 0.22, 0.22, 0.95)
+	elif pct <= 0.55:
+		col = Color(1.0, 0.85, 0.15, 0.95)
+	_health_bar_mat.set_shader_parameter("fill_color", col)
+	# Hidden at full health
+	_health_bar.visible = pct < 0.999
 
 func _physics_process(delta: float) -> void:
 	_update_health_bar()
@@ -303,40 +273,8 @@ func _do_hit_flash(is_crit: bool, amount: float) -> void:
 
 func _on_died(_killer: Node) -> void:
 	_stun_timer = 999.0
-	if ragdoll == null:
-		_setup_ragdoll()
-	if ragdoll:
-		var dir: Vector3 = Vector3.ZERO
-		var pos: Vector3 = global_position + Vector3(0, 0.9, 0)
-		var strength: float = 7.0
-		if _killer is Node3D and _killer != self:
-			dir = (global_position - (_killer as Node3D).global_position)
-			dir.y = 0.18
-			if dir.length() < 0.1:
-				dir = Vector3.FORWARD
-			dir = dir.normalized()
-			if _killer is CharacterBody3D:
-				var kv: Vector3 = (_killer as CharacterBody3D).velocity
-				if kv.length() > 1.0:
-					dir = (dir + kv.normalized()*0.5).normalized()
-					strength += kv.length() * 0.22
-			# Use last knockback from Health if available (more accurate)
-			if health and health.get("_last_knockback") != null:
-				var kb: Vector3 = health.get("_last_knockback")
-				if kb.length() > 0.5:
-					dir = kb.normalized()
-					strength = kb.length() * 0.9 + 5.0
-		else:
-			dir = Vector3(randf_range(-1,1), 0.18, randf_range(-1,1)).normalized()
-		ragdoll.start_ragdoll(dir, pos, strength)
-		# Also play falling anim before ragdoll takes over? No, ragdoll freezes anim
-	else:
-		_play("falling_idle" if c11_ap and c11_ap.has_animation("falling_idle") else "Idle", 0.08)
-		if _mesh:
-			var tw := create_tween()
-			tw.tween_property(_mesh, "scale", Vector3(1.18, 0.68, 1.18), 0.14)
-	# Respawn is handled solely by Health._do_death_effect to avoid double timers
-	# (previously this and Health both scheduled respawn causing double teleport + slide)
+	# The ragdoll launch is started by RagdollController (it listens to Health.died);
+	# respawn is scheduled by Health._do_death_effect.
 
 func respawn() -> void:
 	if has_meta("is_being_grabbed") and bool(get_meta("is_being_grabbed")):

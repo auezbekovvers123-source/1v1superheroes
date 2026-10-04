@@ -87,16 +87,7 @@ func _process(delta: float) -> void:
 		_mesh.position.y = _base_y + y_off
 		# Rotate
 		_mesh.rotation.y += deg_to_rad(rotation_speed) * delta
-	# Interact check
-	if require_interact and not auto_pickup and not _picked:
-		if _inside_bodies.size() > 0 and (Input.is_key_pressed(KEY_F) or (InputMap.has_action("interact") and Input.is_action_just_pressed("interact"))):
-			for body in _inside_bodies:
-				if _is_player(body):
-					if body.has_method("_try_interact_pickup"):
-						body.call("_try_interact_pickup")
-					else:
-						_try_pickup(body)
-					break
+	# Interact pickups are driven by the player (its "interact" action calls try_interact).
 
 func _on_body_entered(body: Node3D) -> void:
 	if _picked:
