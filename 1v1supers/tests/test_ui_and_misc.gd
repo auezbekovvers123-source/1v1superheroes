@@ -71,3 +71,4 @@ func run() -> void:
 	var city_player := current_scene.find_child("Player", true, false) as Player
 	check(city_player != null and city_player.is_in_group("local_player"), "city level has a local player")
 	check(current_scene.find_child("GeneratedCity", true, false) != null, "the city is generated")
+	await seconds(2.0) # let the last hit sounds finish: exiting mid-sound reads as a leak in headless runs

@@ -41,3 +41,4 @@ func run() -> void:
 	await seconds(0.5)
 	check(a.health.current < hp0, "the punch damages player 1 (%.0f -> %.0f)" % [hp0, a.health.current])
 	check(b.health.current == b.health.max_health, "player 2 does not hit itself")
+	await seconds(2.0) # let the hit sounds finish: exiting mid-sound reads as a leak in headless runs
