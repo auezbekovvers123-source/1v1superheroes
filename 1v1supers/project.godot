@@ -15,7 +15,6 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 [application]
 
 config/name="project_SUPA"
-config/tags=PackedStringArray("templates")
 run/main_scene="uid://cshu3tu2u3i7a"
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"
@@ -26,10 +25,6 @@ driver/output_latency=0
 driver/output_latency.web=0
 driver/mix_rate=48000
 driver/mix_rate.web=48000
-
-[dotnet]
-
-project/assembly_name="Third Person Controller New"
 
 [editor_plugins]
 

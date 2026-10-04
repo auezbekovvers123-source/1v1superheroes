@@ -1,7 +1,7 @@
 [gd_resource type="Resource" script_class="ItemData" format=3 uid="uid://coka02hmxojdk"]
 
 [ext_resource type="Script" uid="uid://b5kq51oq4dsa4" path="res://Scripts/Item/ItemData.gd" id="1_data"]
-[ext_resource type="PackedScene" uid="uid://bq7m2dak8d4e5" path="res://Scenes/Items/Cloak.tscn" id="2_scene"]
+[ext_resource type="PackedScene" uid="uid://bq7m2c9k8d4e5" path="res://Scenes/Items/Cloak.tscn" id="2_scene"]
 [ext_resource type="ArrayMesh" uid="uid://uanbposmxfrh" path="res://Assets/Item/Cloak Assets/cloak_mesh.obj" id="3_mesh"]
 [ext_resource type="Material" uid="uid://j3e4i1ipwqt0" path="res://Assets/Item/Cloak Assets/cloak_material.tres" id="4_mat"]
 

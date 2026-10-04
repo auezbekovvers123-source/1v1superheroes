@@ -24,7 +24,7 @@ func _run() -> void:
 	floor_shape.position = Vector3(0, -0.5, 0)
 	root.add_child(floor_body)
 
-	var ps: PackedScene = load("res://Scenes/Characters/C11_Player.tscn")
+	var ps: PackedScene = load("res://Scenes/Characters/player.tscn")
 	player = ps.instantiate()
 	root.add_child(player)
 	player.global_position = Vector3(0, 0.2, 0)

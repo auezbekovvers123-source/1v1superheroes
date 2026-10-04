@@ -3,7 +3,7 @@
 [ext_resource type="Script" path="res://Scripts/Item/ItemPickup.gd" id="1_pickup"]
 [ext_resource type="PackedScene" uid="uid://bq7m2c9k8d4e5" path="res://Scenes/Items/Cloak.tscn" id="2_cloak"]
 [ext_resource type="ArrayMesh" uid="uid://uanbposmxfrh" path="res://Assets/Item/Cloak Assets/cloak_mesh.obj" id="3_mesh"]
-[ext_resource type="Material" uid="uid://h9v5bmuzucidj" path="res://Assets/Item/Cloak Assets/cloak_material.tres" id="4_mat"]
+[ext_resource type="Material" uid="uid://j3e4i1ipwqt0" path="res://Assets/Item/Cloak Assets/cloak_material.tres" id="4_mat"]
 [ext_resource type="Resource" uid="uid://coka02hmxojdk" path="res://Assets/Item/Cloak Assets/cloak_item.tres" id="5_item_data"]
 
 [sub_resource type="SphereShape3D" id="SphereShape3D_pickup"]

@@ -4,12 +4,12 @@ importer="scene"
 importer_version=1
 type="PackedScene"
 uid="uid://cdmb1hiewraam"
-path="res://.godot/imported/С11.glb-df50fcee4e3ebfb85902efc64d342eee.scn"
+path="res://.godot/imported/C11.glb-940e770415d72dab57bd6b33274fc699.scn"
 
 [deps]
 
-source_file="res://Assets/Models/Characters/С11.glb"
-dest_files=["res://.godot/imported/С11.glb-df50fcee4e3ebfb85902efc64d342eee.scn"]
+source_file="res://Assets/Models/Characters/C11.glb"
+dest_files=["res://.godot/imported/C11.glb-940e770415d72dab57bd6b33274fc699.scn"]
 
 [params]
 

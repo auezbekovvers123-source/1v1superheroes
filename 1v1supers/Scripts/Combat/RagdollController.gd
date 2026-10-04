@@ -3,7 +3,7 @@ class_name RagdollController
 ## RagdollController — GTA5 style ragdoll on death
 ## Drop as child of CharacterBody3D (Player or Dummy). Auto-finds Skeleton3D, builds PhysicalBones,
 ## starts simulation on death, applies knockback impulse and lets physics flop.
-## Supports both C11 (С11.glb) skeleton and Object_Character skeleton generically.
+## Supports both C11 (C11.glb) skeleton and Object_Character skeleton generically.
 
 @export var skeleton_path: NodePath = NodePath("")
 @export var capsule_radius_scale: float = 1.0
@@ -367,7 +367,7 @@ func _config_for_bone(bname: String, idx: int) -> Dictionary:
 	var lname := bname.to_lower()
 	var cfg: Dictionary = {}
 
-	# --- C11 naming (С11.glb) ---
+	# --- C11 naming (C11.glb) ---
 	if bname == "root.x" or lname == "root.x":
 		cfg = {"shape":"box", "size": Vector3(0.32, 0.22, 0.20), "mass": 5.0, "joint_type": PhysicalBone3D.JOINT_TYPE_PIN}
 	elif bname == "spine_01.x":

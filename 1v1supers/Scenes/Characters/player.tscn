@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" uid="uid://cjrulo0con0q3" path="res://Scripts/Characters/Player.gd" id="1_hn6di"]
 [ext_resource type="Script" uid="uid://d0j48omj8xuh2" path="res://Scripts/Characters/SpringArmPivot.gd" id="2_f8ihf"]
-[ext_resource type="PackedScene" uid="uid://cyfm8p1hwp7pm" path="res://Assets/Models/Characters/С11.glb" id="3_c11"]
+[ext_resource type="PackedScene" uid="uid://cdmb1hiewraam" path="res://Assets/Models/Characters/C11.glb" id="3_c11"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_k6p7c"]
 radius = 0.283343

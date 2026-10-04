@@ -990,7 +990,7 @@ func _update_flight(delta: float) -> void:
 func _setup_c11_if_present() -> void:
 	var c11_node = null
 	var ap: AnimationPlayer = null
-	for child_name in ["C11", "С11"]:
+	for child_name in ["C11"]:
 		var candidate = get_node_or_null("Mesh/" + child_name)
 		if candidate:
 			c11_node = candidate
