@@ -87,4 +87,5 @@ func _report() -> Dictionary:
 		"fly": player.has_power("fly"),
 		"host_hp": host_copy.health.current if host_copy else -1.0,
 		"host_pos": host_copy.global_position if host_copy else Vector3.ZERO,
+		"host_state": String(host_copy.state.name) if host_copy else "",
 	}

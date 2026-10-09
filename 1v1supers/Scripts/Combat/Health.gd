@@ -28,6 +28,9 @@ var _invuln_timer: float = 0.0
 ## Online games set this (NetSync): it decides on which machine a detected hit
 ## is applied and returns whether it counts. Offline it is unset.
 var route_hit: Callable
+## The body's defence (Guard.filter): may soften the hit or mark it blocked /
+## parried / guard-broken before it is applied. Unset = every hit lands clean.
+var guard: Callable
 
 func _ready() -> void:
 	current = max_health
@@ -54,6 +57,8 @@ func take_damage(hit: HitInfo) -> bool:
 func apply_damage(hit: HitInfo, hp_after: float = -1.0) -> bool:
 	if is_dead or (hp_after < 0.0 and not can_take_damage()):
 		return false
+	if hp_after < 0.0 and guard.is_valid():
+		guard.call(hit) # a replayed hit (hp_after given) was already guarded on its owner's machine
 	current = maxf(current - hit.damage, 0.0) if hp_after < 0.0 else clampf(hp_after, 0.0, max_health)
 	_invuln_timer = invuln_time
 	last_hit = hit

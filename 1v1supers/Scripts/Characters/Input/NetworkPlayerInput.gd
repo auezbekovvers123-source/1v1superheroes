@@ -105,6 +105,7 @@ func _fill(i: Intent, p: Array) -> void:
 	i.aim_held = (held & NetCodec.HELD_AIM) != 0
 	i.throw_held = (held & NetCodec.HELD_THROW) != 0
 	i.fly_down_held = (held & NetCodec.HELD_FLY_DOWN) != 0
+	i.block_held = (held & NetCodec.HELD_BLOCK) != 0
 	i.jump_released = _was_jump and not i.jump_held
 	_was_jump = i.jump_held
 	var counters: int = p[NetCodec.PRESSES]

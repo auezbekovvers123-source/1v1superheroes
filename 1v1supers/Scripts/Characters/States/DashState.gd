@@ -29,6 +29,7 @@ func enter(_args: Dictionary) -> void:
 	player.dash_direction = _dir
 	player.dash_recovery_timer = player.dash_duration + player.dash_recovery
 	player.stamina.use(player.stamina.cost_dash)
+	player.health.set_invulnerable(player.dodge_iframes) # dodge through a swing
 	player.animator.play_action(_pick_anim(stick), player.dash_anim_speed_scale, 0.06, 0.12, PlayerAnimator.Mask.FULL)
 
 ## Directional dodge clip. Diagonals use forward/backward (and turn the body);

@@ -13,6 +13,10 @@ var hitstop: float = 0.0 # seconds the target is frozen before the knockback lan
 var shake: float = 0.0 # camera trauma for the attacker's camera
 var attacker: Node3D = null
 var kind: Kind = Kind.OTHER
+# Set by the target's Guard when the hit meets a raised guard
+var blocked: bool = false ## caught on the guard: chip damage, little knockback
+var parried: bool = false ## guard raised just in time: no damage, the attacker staggers
+var guard_broken: bool = false ## guard out of stamina: full hit, the target staggers
 
 static func make(p_damage: float, p_attacker: Node3D = null, p_knockback := Vector3.ZERO, p_kind := Kind.OTHER, p_hitstop := 0.0, p_shake := 0.0) -> HitInfo:
 	var h := HitInfo.new()

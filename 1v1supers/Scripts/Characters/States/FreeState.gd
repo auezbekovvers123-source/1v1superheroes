@@ -6,6 +6,9 @@ func allows_air_anims() -> bool:
 	return true
 
 func handle_intent(i: PlayerInput.Intent) -> void:
+	if i.block_held and player.try_change_state(&"block"):
+		player.state.handle_intent(i) # a press on the same frame acts from the guard
+		return
 	if i.attack_pressed:
 		player.start_attack_or_use()
 	if player.state != self:

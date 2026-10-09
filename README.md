@@ -9,8 +9,9 @@ Open `1v1supers/project.godot` and press Play — the main scene is `prototype.t
 |---|---|
 | Move / run | WASD / Shift |
 | Jump (and fly up) | Space |
-| Dash | Ctrl |
+| Dash (you can't be hit for the first 0.18 s: dodge through a swing) | Ctrl |
 | Punch combo (hook, jab, cross, spin kick) | Left mouse |
+| Block (hold). Raise it just before a hit to **parry** | V or mouse thumb button |
 | Aim (tighter target lock) | Right mouse |
 | Interact: pick up item, grab/drop a knocked-out body, use a held usable item | F or E |
 | Throw: hold to charge, release to throw (tap to drop) | G or Q |
@@ -71,6 +72,18 @@ How it works:
   on each PC separately, so they can differ a little. Also: 2 players, no
   reconnect, no cheat protection (play with friends).
 
+## Fighting
+
+- **Block** (hold V): hits from the front only chip 15% of their damage and push
+  you back a little, but cost stamina (kicks cost more). Run out of stamina and
+  the guard breaks: the hit lands in full and you stagger. Hits from behind
+  ignore the guard. You walk slowly with the guard up, and can punch or dodge
+  straight out of it.
+- **Parry**: raise the guard within 0.15 s of a hit landing and it does nothing;
+  the attacker staggers for 0.6 s, open for a counter. The guard must have been
+  down for 0.4 s first, so mashing block doesn't parry.
+- **Dodge**: the dash can't be hit for its first 0.18 s.
+
 ## How the code is organised
 
 Each piece owns one job; nothing else reaches into it.
@@ -80,9 +93,11 @@ Player (CharacterBody3D)            Scripts/Characters/Player.gd — locomotion 
 ├─ Input        PlayerInput         WHAT the fighter wants this frame (the only reader of Input)
 │                                   LocalPlayerInput = keyboard/mouse, ScriptedPlayerInput = AI/tests/network
 ├─ state        PlayerState         WHAT it is doing — exactly one at a time:
-│                                   Free, Attack, Dash, Turn, Gesture, ThrowCharge, UseItem, Fly, Dead
+│                                   Free, Attack, Dash, Turn, Gesture, ThrowCharge, UseItem, Fly,
+│                                   Block, Stagger, Dead
 ├─ Animator     PlayerAnimator      the only thing that touches the AnimationTree
 ├─ MeleeCombat                      combo data, hitboxes, target finding
+├─ Guard                            block / parry / guard break: edits incoming hits
 ├─ HandHold                         the held item: visual, use, throw
 ├─ Stamina, Footsteps
 ├─ Health, Hurtbox3D                hit points / where you can be hit
@@ -113,12 +128,13 @@ NetMenu          the F1 panel
 
 Headless gameplay tests drive the player through `ScriptedPlayerInput` and check
 speeds, jump heights, dash distance, combo damage/timing, throws, flight,
-death/respawn, grabbing, two-player independence and the inventory UI. Numbers
-marked *golden* were measured on the game before the refactor.
+death/respawn, grabbing, two-player independence, block/parry/guard break/dodge
+(`test_defense`) and the inventory UI. Numbers marked *golden* were measured on
+the game before the refactor.
 
 The network tests start a second Godot process and play a real session over
-localhost: `test_network` (movement, view, hits both ways, KO/respawn, pickups,
-throws, worn items, leaving), `test_network_lag` (the same over 70-110 ms lag
+localhost: `test_network` (movement, view, hits both ways, block and parry
+across machines, KO/respawn, pickups, throws, worn items, leaving), `test_network_lag` (the same over 70-110 ms lag
 with 5% packet loss), `test_steam_flow` (lobby, invite, join and play through a
 fake Steam; real Steam needs a Steam client, so test that by hand) and
 `test_net_menu`.

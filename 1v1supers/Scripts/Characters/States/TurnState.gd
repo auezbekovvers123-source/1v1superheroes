@@ -43,7 +43,7 @@ func exit() -> void:
 	player.turn_cooldown_timer = player.turn_cooldown * 0.5
 
 func handle_intent(i: PlayerInput.Intent) -> void:
-	if i.has_move() or i.attack_pressed or i.jump_pressed or i.dash_pressed:
+	if i.has_move() or i.attack_pressed or i.jump_pressed or i.dash_pressed or i.block_held:
 		player.change_state(&"free")
 		player.state.handle_intent(i) # let the press that cancelled the turn act right away
 

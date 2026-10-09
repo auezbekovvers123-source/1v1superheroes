@@ -11,8 +11,8 @@ class_name Player
 ##    ThrowCharge, UseItem, Fly, Dead — and the state decides what is allowed.
 ##  - Locomotion (this file): walking, running, gravity, jumping, facing.
 ##  - Components (children): Stamina, Footsteps, MeleeCombat, HandHold,
-##    PlayerAnimator, Health, Hurtbox3D, RagdollController, RagdollGrabber,
-##    Inventory, Equipment.
+##    PlayerAnimator, Guard, Health, Hurtbox3D, RagdollController,
+##    RagdollGrabber, Inventory, Equipment.
 
 signal state_changed(from: StringName, to: StringName)
 signal respawned()
@@ -35,6 +35,7 @@ signal picked_from_world(item: Node3D)
 @export var dash_recovery_steer: float = 0.15 # how much movement input steers during recovery
 @export var dash_anim_speed_scale: float = 1.6
 @export var dash_cancel_attack_window: float = 0.55 # a swing younger than this can be cancelled by a dash
+@export var dodge_iframes: float = 0.18 # a dash can't be hit for this long from its start
 
 @export_group("Jump Feel")
 @export var coyote_time: float = 0.14
@@ -95,6 +96,7 @@ var stamina: Stamina
 var footsteps: Footsteps
 var combat: MeleeCombat
 var hand: HandHold
+var guard: Guard
 var health: Health
 var hurtbox: Hurtbox3D
 var ragdoll: RagdollController
@@ -149,6 +151,8 @@ func _ready() -> void:
 		&"use_item": UseItemState.new(self, &"use_item"),
 		&"fly": FlyState.new(self, &"fly"),
 		&"dead": DeadState.new(self, &"dead"),
+		&"block": BlockState.new(self, &"block"),
+		&"stagger": StaggerState.new(self, &"stagger"),
 	}
 	state = _states[&"free"]
 	intent = input.current()
@@ -187,6 +191,9 @@ func _setup_components() -> void:
 	combat = _child("MeleeCombat", func(): return MeleeCombat.new())
 	combat.setup(self)
 	combat.hit_landed.connect(_on_hit_landed)
+	guard = _child("Guard", func(): return Guard.new())
+	guard.setup(self)
+	health.guard = guard.filter
 	ragdoll.about_to_start.connect(reset_mesh_scale)
 	health.damaged.connect(_on_damaged)
 	health.died.connect(_on_died)
@@ -202,15 +209,18 @@ func _child(node_name: String, make: Callable) -> Node:
 
 ## Replace who controls this fighter (keyboard, AI, network, tests).
 func set_input(source: PlayerInput) -> void:
-	if input and input != source:
-		remove_child(input)
-		input.queue_free()
+	# Before _ready the scene's own Input child is not in `input` yet: replace it too
+	var old: Node = input if input else get_node_or_null("Input")
+	if old and old != source:
+		remove_child(old)
+		old.queue_free()
 	input = source
 	source.name = "Input"
 	if source.get_parent() == null:
 		add_child(source)
 	intent = input.current()
-	_apply_input_ownership()
+	if is_node_ready():
+		_apply_input_ownership() # else _ready does it
 
 ## Only a local human gets the camera and the mouse.
 func _apply_input_ownership() -> void:
@@ -646,6 +656,18 @@ func bake_turn_into_mesh() -> void:
 # --- Damage / death ---------------------------------------------------------------
 
 func _on_damaged(hit: HitInfo) -> void:
+	if hit.parried:
+		_guard_flash(Color(0.35, 0.85, 1.0, 0.7))
+		camera_shake(0.25)
+		var attacker := hit.attacker as Player
+		if attacker and attacker != self:
+			attacker.stagger(guard.parry_stagger) # on every machine: this runs for the real fighter and its copies
+		return
+	if hit.blocked:
+		_guard_flash(Color(0.9, 0.95, 1.0, 0.55))
+		camera_shake(0.12)
+		HitReaction.knock(self, hit)
+		return
 	var crit := hit.is_critical()
 	stun_timer = 0.18 if crit else 0.11
 	_hurt_flash(crit)
@@ -654,6 +676,21 @@ func _on_damaged(hit: HitInfo) -> void:
 	if not ragdoll.is_ragdolled():
 		HitReaction.knock(self, hit)
 		HitReaction.hitstop(self, hit.hitstop)
+	if hit.guard_broken:
+		stagger(guard.break_stagger)
+
+## Knocked off balance for `seconds`: no actions (parried, guard broken).
+func stagger(seconds: float) -> void:
+	if not is_dead():
+		change_state(&"stagger", {"time": seconds})
+
+## Reel back: lean, squash, dim flash.
+func stagger_effect() -> void:
+	_hurt_flash(false)
+	stop_mesh_tilt_tween()
+	_tilt_tween = create_tween().set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_tilt_tween.tween_property(mesh, "rotation:x", -0.22, 0.12)
+	_tilt_tween.tween_property(mesh, "rotation:x", 0.0, 0.35)
 
 func _on_hit_landed(target: Node3D, hit: HitInfo) -> void:
 	camera_shake(hit.shake)
@@ -795,6 +832,27 @@ func _spin_trail() -> void:
 	tw.tween_property(trail, "scale", Vector3(2.2, 1, 2.2), 0.18)
 	tw.parallel().tween_property(mat, "albedo_color:a", 0.0, 0.18)
 	tw.tween_callback(trail.queue_free)
+
+## Shield-coloured flash in front of the body (blocked / parried hit).
+func _guard_flash(color: Color) -> void:
+	var flash := MeshInstance3D.new()
+	var disc := CylinderMesh.new()
+	disc.top_radius = 0.55
+	disc.bottom_radius = 0.55
+	disc.height = 0.04
+	flash.mesh = disc
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = color
+	flash.material_override = mat
+	mesh.add_child(flash)
+	flash.position = Vector3(0, 1.15, 0.45)
+	flash.rotation = Vector3(PI / 2.0, 0, 0)
+	var tw := create_tween()
+	tw.tween_property(flash, "scale", Vector3(1.3, 1, 1.3), 0.15)
+	tw.parallel().tween_property(mat, "albedo_color:a", 0.0, 0.2)
+	tw.tween_callback(flash.queue_free)
 
 func _hurt_flash(is_crit: bool) -> void:
 	var flash := MeshInstance3D.new()

@@ -54,7 +54,7 @@ func is_holding_usable() -> bool:
 func blocks(action: StringName) -> bool:
 	if held_item == null:
 		return false
-	return action in [&"dash", &"jump", &"grab", &"pickup", &"throw_empty"] or (action == &"attack" and not held_item.is_usable)
+	return action in [&"dash", &"jump", &"grab", &"pickup", &"throw_empty", &"block"] or (action == &"attack" and not held_item.is_usable)
 
 ## Puts an item into the hand. Fails (with feedback) when the hand is full.
 func pick_up(data: ItemData) -> bool:

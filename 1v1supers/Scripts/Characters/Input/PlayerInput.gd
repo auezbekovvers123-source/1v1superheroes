@@ -25,6 +25,7 @@ class Intent:
 	var throw_pressed := false
 	var power_pressed := false
 	var fly_down_held := false
+	var block_held := false
 	var debug_hitbox_pressed := false
 	## Where the controller looks. Sources without a camera of their own (network
 	## replay) fill these; otherwise the fighter reads its camera rig.
@@ -46,6 +47,7 @@ class Intent:
 		throw_pressed = false
 		power_pressed = false
 		fly_down_held = false
+		block_held = false
 		debug_hitbox_pressed = false
 		has_view = false
 

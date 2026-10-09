@@ -441,7 +441,7 @@ func _on_event(from: int, tick: int, kind: StringName, args: Array) -> void:
 
 func _on_hit(from: int, data: Array) -> void:
 	var me := fighter(_my_id)
-	if me == null or data.size() != 6:
+	if me == null or data.size() < 6:
 		return
 	me.health.apply_damage(NetCodec.decode_hit(data, fighter(from)))
 

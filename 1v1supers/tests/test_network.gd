@@ -94,6 +94,36 @@ func _run_session() -> void:
 	near(player.health.current, 89.0, 0.01, "the client's punch took 11 HP from us, exactly once")
 	near(r.host_hp, 89.0, 0.01, "and the client sees our HP drop")
 
+	section("block and parry, decided on the defender's machine")
+	await _face_off()
+	_cmd("hold", ["block", true])
+	await seconds(0.8) # past the parry window
+	check(copy.state.name == &"block", "we see the client's guard go up")
+	var hp_before: float = (await _report()).hp
+	pin.tap(&"attack")
+	await seconds(1.0)
+	r = await _report()
+	var chipped := hp_before - 11.0 * copy.guard.chip_damage
+	near(r.hp, chipped, 0.01, "our punch only chips the client's guard (on its machine)")
+	near(copy.health.current, chipped, 0.01, "and our copy shows the same")
+	_cmd("hold", ["block", false])
+	await seconds(0.8) # the guard has to be down a while before a parry counts
+	_cmd("hold", ["block", true])
+	await frames(3) # the client raises its guard a moment before our hit reaches it
+	copy.health.take_damage(HitInfo.make(11.0, player, Vector3(-2.3, 0.35, 0), HitInfo.Kind.PUNCH))
+	var staggered := false
+	for i in 40:
+		await physics_frame
+		if player.state.name == &"stagger":
+			staggered = true
+			break
+	check(staggered, "the client parried: our own fighter staggers here")
+	r = await _report()
+	near(r.hp, chipped, 0.01, "and the parried hit did no damage")
+	check(r.host_state == "stagger", "the client sees us stagger too")
+	_cmd("hold", ["block", false])
+	await seconds(1.5)
+
 	section("KO and respawn")
 	copy.health.take_damage(HitInfo.make(500.0, player, Vector3(0, 2, 0)))
 	await seconds(1.0)
