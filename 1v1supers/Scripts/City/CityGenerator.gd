@@ -151,6 +151,7 @@ class DecorInfo:
 	var grid_position: Vector2i
 	var occupied_rect: Rect2
 
+var _rng := RandomNumberGenerator.new()
 var _generated_root: Node3D
 # Global FOOTPRINT occupancy: Vector2i -> true (footprints only; spacing is
 # enforced at query time so the gap equals building_spacing_tiles, not 2x).
@@ -179,10 +180,11 @@ func generate_city():
 		push_warning("[CityGenerator] building_max_size_tiles < min – clamping")
 		building_max_size_tiles.x = maxi(building_max_size_tiles.x, building_min_size_tiles.x)
 		building_max_size_tiles.y = maxi(building_max_size_tiles.y, building_min_size_tiles.y)
+	# Own RNG: reseeding the global one would change every other random roll in the game.
 	if random_seed == 0:
-		randomize()
+		_rng.randomize()
 	else:
-		seed(random_seed)
+		_rng.seed = random_seed
 
 	var ground_tile_path = base_folder_path.path_join(ground_tile_name + ".glb")
 	var road_straight_path = base_folder_path.path_join(road_straight_name + ".glb")
@@ -709,16 +711,16 @@ func _place_buildings_in_sections(sections: Array, building_models: Array, grid_
 			attempts += 1
 			var try_pos: Vector2i
 			if available_tiles_array.size() <= 12:
-				try_pos = available_tiles_array[randi() % available_tiles_array.size()]
+				try_pos = available_tiles_array[_rng.randi() % available_tiles_array.size()]
 			else:
 				# 75% street wall, 25% interior fill for density + variety.
-				if randf() < 0.75:
-					try_pos = available_tiles_array[randi() % 12]
+				if _rng.randf() < 0.75:
+					try_pos = available_tiles_array[_rng.randi() % 12]
 				else:
-					try_pos = available_tiles_array[randi() % available_tiles_array.size()]
-			var model_info = building_models[randi() % building_models.size()]
-			var width = randi_range(building_min_size_tiles.x, building_max_size_tiles.x)
-			var depth = randi_range(building_min_size_tiles.y, building_max_size_tiles.y)
+					try_pos = available_tiles_array[_rng.randi() % available_tiles_array.size()]
+			var model_info = building_models[_rng.randi() % building_models.size()]
+			var width = _rng.randi_range(building_min_size_tiles.x, building_max_size_tiles.x)
+			var depth = _rng.randi_range(building_min_size_tiles.y, building_max_size_tiles.y)
 			if width + building_spacing_tiles > section.bounds.size.x:
 				continue
 			if depth + building_spacing_tiles > section.bounds.size.y:
@@ -727,8 +729,8 @@ func _place_buildings_in_sections(sections: Array, building_models: Array, grid_
 			# unrotated footprint), so non-square footprints don't pick a side
 			# they no longer touch after the 90/270 swap ("some line up").
 			var street_side = _nearest_street_side(try_pos, section)
-			var rotation_degrees = _rotation_for_street_side(street_side)
-			var rotated_size = _get_rotated_size(Vector2i(width, depth), rotation_degrees)
+			var rot_deg = _rotation_for_street_side(street_side)
+			var rotated_size = _get_rotated_size(Vector2i(width, depth), rot_deg)
 			# Street wall: slide the road-facing edge flush to the block edge
 			# so fronts share one line. Fall back to the sampled tile if the
 			# flush spot is taken (keeps density, lines up when possible).
@@ -744,7 +746,7 @@ func _place_buildings_in_sections(sections: Array, building_models: Array, grid_
 				continue
 			if _is_global_area_occupied(place_pos, rotated_size, building_spacing_tiles):
 				continue
-			var building = _create_building_instance(place_pos, Vector2i(width, depth), rotated_size, rotation_degrees, model_info)
+			var building = _create_building_instance(place_pos, Vector2i(width, depth), rotated_size, rot_deg, model_info)
 			all_buildings.append(building)
 			# Store FOOTPRINT rect (gap enforced at query time).
 			section.occupied_rects.append(Rect2(place_pos.x, place_pos.y, rotated_size.x, rotated_size.y))
@@ -763,13 +765,13 @@ func _place_buildings_in_sections(sections: Array, building_models: Array, grid_
 func _shuffle_array(array: Array):
 	var n = array.size()
 	for i in range(n - 1, 0, -1):
-		var j = randi() % (i + 1)
+		var j = _rng.randi() % (i + 1)
 		var temp = array[i]
 		array[i] = array[j]
 		array[j] = temp
 
-func _get_rotated_size(original_size: Vector2i, rotation_degrees: float) -> Vector2i:
-	var rot_normalized = int(rotation_degrees) % 360
+func _get_rotated_size(original_size: Vector2i, rot_deg: float) -> Vector2i:
+	var rot_normalized = int(rot_deg) % 360
 	if rot_normalized == 90 or rot_normalized == 270:
 		return Vector2i(original_size.y, original_size.x)
 	return original_size
@@ -797,13 +799,13 @@ func _nearest_street_side(pos: Vector2i, section: Section) -> String:
 		options.append("south")
 	if options.is_empty():
 		options.append("south")
-	return str(options[randi() % options.size()])
+	return str(options[_rng.randi() % options.size()])
 
 ## Base yaw per street side (front faces the street), plus user offset.
 ## Kit front is +Z (south) at rot 0, so west=90 east=270 north=0 south=180.
 func _rotation_for_street_side(side: String) -> float:
 	if not orient_buildings_to_road:
-		return float((randi() % 4) * 90)
+		return float((_rng.randi() % 4) * 90)
 	var base := 180.0
 	match side:
 		"west":
@@ -835,7 +837,7 @@ func _flush_pos_to_street(pos: Vector2i, rotated_size: Vector2i, section: Sectio
 			return Vector2i(pos.x, z0 + h - rotated_size.y)
 	return pos
 
-func _get_road_facing_rotation(pos: Vector2i, size: Vector2i, section: Section) -> float:
+func _get_road_facing_rotation(pos: Vector2i, _size: Vector2i, section: Section) -> float:
 	# Kept for API compatibility – now size-independent so the picked side
 	# stays valid after the 90/270 footprint swap.
 	return _rotation_for_street_side(_nearest_street_side(pos, section))
@@ -868,10 +870,10 @@ func _validate_buildings_on_grid(buildings: Array, grid_data: Dictionary) -> int
 		var unwound = fmod(b.rotation_y - building_front_offset_degrees, 360.0)
 		if unwound < 0.0:
 			unwound += 360.0
-		var snapped = roundf(unwound / 90.0) * 90.0
-		if absf(unwound - snapped) > 0.01:
+		var snapped_rot = roundf(unwound / 90.0) * 90.0
+		if absf(unwound - snapped_rot) > 0.01:
 			push_warning("[CityGenerator] Building %s yaw %.1f not cardinal – snapping" % [str(b.model_name), b.rotation_y])
-			b.rotation_y = fmod(snapped + building_front_offset_degrees, 360.0)
+			b.rotation_y = fmod(snapped_rot + building_front_offset_degrees, 360.0)
 			bad += 1
 	if bad > 0:
 		push_warning("[CityGenerator] Grid audit: %d building issues (see above)" % bad)
@@ -922,7 +924,7 @@ func _is_global_area_occupied(pos: Vector2i, size: Vector2i, spacing: int) -> bo
 				return true
 	return false
 
-func _mark_global_area_occupied(pos: Vector2i, size: Vector2i, spacing: int = -1):
+func _mark_global_area_occupied(pos: Vector2i, size: Vector2i, _spacing: int = -1):
 	# Footprints only (spacing enforced at query). Extra spacing arg kept for
 	# API compatibility but ignored – gap lives in the query, not the mark.
 	for dx in range(size.x):
@@ -930,14 +932,14 @@ func _mark_global_area_occupied(pos: Vector2i, size: Vector2i, spacing: int = -1
 			var p = pos + Vector2i(dx, dz)
 			_global_occupied_tiles[p] = true
 
-func _create_building_instance(grid_pos: Vector2i, original_size: Vector2i, rotated_size: Vector2i, rotation: float, model_info: Dictionary) -> BuildingInfo:
+func _create_building_instance(grid_pos: Vector2i, original_size: Vector2i, rotated_size: Vector2i, rot_y: float, model_info: Dictionary) -> BuildingInfo:
 	var building = BuildingInfo.new()
 	building.model_path = model_info.path
 	building.model_name = model_info.name
 	building.size_tiles = original_size
 	building.rotated_size = rotated_size
 	building.grid_position = grid_pos
-	building.rotation_y = rotation
+	building.rotation_y = rot_y
 	# Mesh-aware scale: fit visual inside logical footprint, never overflow.
 	# v1 clamped the minimum UP to 0.85, so oversized meshes overlapped
 	# neighbours and looked "weird". Now we shrink to fit when needed.
@@ -954,12 +956,12 @@ func _create_building_instance(grid_pos: Vector2i, original_size: Vector2i, rota
 	if max_allowed >= 0.85:
 		# Normal Kenney 2m buildings: preserve v1 look (0.88–0.96).
 		min_allowed = maxf(0.88, max_allowed - 0.08)
-		scale_var = randf_range(min_allowed, max_allowed)
+		scale_var = _rng.randf_range(min_allowed, max_allowed)
 	else:
 		# Oversized mesh: shrink to fit instead of overlapping.
 		min_allowed = maxf(0.3, max_allowed - 0.1)
 		max_allowed = maxf(0.3, max_allowed)
-		scale_var = randf_range(min_allowed, max_allowed)
+		scale_var = _rng.randf_range(min_allowed, max_allowed)
 	building.scale = Vector3(scale_var, scale_var, scale_var)
 	building.mesh_size = mesh_sz
 	# GRID: align building center to tile centers + exact grounding with sink.
@@ -1052,21 +1054,21 @@ func _place_vehicles_on_roads(grid_data: Dictionary, vehicle_models: Array) -> A
 			break
 		if blocked.has(pos):
 			continue
-		var model_info = vehicle_models[randi() % vehicle_models.size()]
+		var model_info = vehicle_models[_rng.randi() % vehicle_models.size()]
 		var axis = _road_direction_at(pos, grid_data)
 		# Car mesh is long in Z at rot 0 (0.42 x 0.94). Align length to street.
 		var rot_y: float
 		var lane_sign = 1.0
 		if axis == "EW":
 			# East (90) or West (270).
-			if randf() < 0.5:
+			if _rng.randf() < 0.5:
 				rot_y = 90.0
 				lane_sign = -1.0 # eastbound hugs north side
 			else:
 				rot_y = 270.0
 				lane_sign = 1.0 # westbound hugs south side
 		else:
-			if randf() < 0.5:
+			if _rng.randf() < 0.5:
 				rot_y = 0.0
 				lane_sign = -1.0 # southbound hugs west side
 			else:
@@ -1075,7 +1077,7 @@ func _place_vehicles_on_roads(grid_data: Dictionary, vehicle_models: Array) -> A
 		var mesh_sz: Vector3 = _model_footprints.get(model_info.path, Vector3(0.5, 0.5, 0.5))
 		# Keep cars near full size so wheels meet the road; clamp only if a
 		# custom car mesh is wider than its lane.
-		var sc = randf_range(0.95, 1.05)
+		var sc = _rng.randf_range(0.95, 1.05)
 		if mesh_sz.x * sc > tile_size.x * 0.9 or mesh_sz.z * sc > tile_size.z * 1.4:
 			sc = minf((tile_size.x * 0.9) / maxf(mesh_sz.x, 0.01), (tile_size.z * 1.4) / maxf(mesh_sz.z, 0.01))
 		var base_x = pos.x * tile_size.x + city_offset.x
@@ -1148,11 +1150,11 @@ func _place_roadside_furniture(grid_data: Dictionary, roadside_models: Array, bu
 		if not ok:
 			continue
 		var road_dirs = _ground_neighbours_road(gp, grid_data)
-		var toward: Vector2i = road_dirs[randi() % road_dirs.size()]
-		var model_info = roadside_models[randi() % roadside_models.size()]
+		var toward: Vector2i = road_dirs[_rng.randi() % road_dirs.size()]
+		var model_info = roadside_models[_rng.randi() % roadside_models.size()]
 		# Sit on the road-side third of the sidewalk tile.
 		var off = Vector3(float(toward.x) * tile_size.x / 3.0, 0, float(toward.y) * tile_size.z / 3.0)
-		var sc = randf_range(0.9, 1.05)
+		var sc = _rng.randf_range(0.9, 1.05)
 		var base = Vector3(gp.x * tile_size.x + city_offset.x, 0, gp.y * tile_size.z + city_offset.z)
 		base.y = _ground_y_for_model(model_info.path, sc, 0.0)
 		# Face the street (snap 90° so gantry arms stay axis-aligned).
@@ -1233,13 +1235,13 @@ func _place_trafficlights_at_intersections(grid_data: Dictionary, signal_models:
 					break
 			if not ok:
 				continue
-			var model_info = signal_models[randi() % signal_models.size()]
+			var model_info = signal_models[_rng.randi() % signal_models.size()]
 			# Stand on the corner of the tile nearest the crossing, face it.
 			var to_cross: Vector2i = cross - gp
 			var sx = clampi(to_cross.x, -1, 1)
 			var sz = clampi(to_cross.y, -1, 1)
 			var off = Vector3(float(sx) * tile_size.x / 3.0, 0, float(sz) * tile_size.z / 3.0)
-			var sc = randf_range(0.9, 1.05)
+			var sc = _rng.randf_range(0.9, 1.05)
 			var base = Vector3(gp.x * tile_size.x + city_offset.x, 0, gp.y * tile_size.z + city_offset.z)
 			base.y = _ground_y_for_model(model_info.path, sc, 0.0)
 			var yaw = rad_to_deg(atan2(float(sx), float(sz)))
@@ -1285,7 +1287,7 @@ func _place_props_on_ground(grid_data: Dictionary, prop_models: Array, buildings
 	if free.is_empty():
 		return all_props
 	_shuffle_array(free)
-	# v1 double-dipped density (target *= density AND randf() > density skip),
+	# v1 double-dipped density (target *= density AND _rng.randf() > density skip),
 	# yielding ~density^2 fill. Use single gate so 0.35 means 35%.
 	var target_decor = int(float(free.size()) * decor_density)
 	target_decor = mini(target_decor, int(float(free.size()) * 0.5))
@@ -1295,8 +1297,8 @@ func _place_props_on_ground(grid_data: Dictionary, prop_models: Array, buildings
 			break
 		if not _is_valid_decor_position(ground_pos, grid_data, building_tiles, placed):
 			continue
-		var model_info = prop_models[randi() % prop_models.size()]
-		var anchor = decor_anchor_points_enabled[randi() % decor_anchor_points_enabled.size()] if decor_anchor_points_enabled.size() > 0 else "center"
+		var model_info = prop_models[_rng.randi() % prop_models.size()]
+		var anchor = decor_anchor_points_enabled[_rng.randi() % decor_anchor_points_enabled.size()] if decor_anchor_points_enabled.size() > 0 else "center"
 		var world_x = ground_pos.x * tile_size.x + city_offset.x
 		var world_z = ground_pos.y * tile_size.z + city_offset.z
 		# Scale first so grounding can compensate min_y correctly.
@@ -1305,7 +1307,7 @@ func _place_props_on_ground(grid_data: Dictionary, prop_models: Array, buildings
 		if mesh_sz.x > 0.6 or mesh_sz.z > 0.6:
 			max_decor_scale = minf(1.15, (tile_size.x * 0.85) / maxf(mesh_sz.x, mesh_sz.z))
 		max_decor_scale = maxf(max_decor_scale, 0.85)
-		var scale_var = randf_range(0.85, max_decor_scale)
+		var scale_var = _rng.randf_range(0.85, max_decor_scale)
 		var base_pos = Vector3(world_x, _ground_y_for_model(model_info.path, scale_var, 0.0), world_z)
 		var offset = _get_anchor_offset(anchor, tile_size)
 		var decor_pos = base_pos + offset
@@ -1316,7 +1318,7 @@ func _place_props_on_ground(grid_data: Dictionary, prop_models: Array, buildings
 		decor.anchor_point = anchor
 		decor.grid_position = ground_pos
 		decor.occupied_rect = Rect2(ground_pos.x - decor_spacing_tiles, ground_pos.y - decor_spacing_tiles, 1 + (decor_spacing_tiles * 2), 1 + (decor_spacing_tiles * 2))
-		decor.rotation_y = float((randi() % 4) * 90)
+		decor.rotation_y = float((_rng.randi() % 4) * 90)
 		decor.scale = Vector3(scale_var, scale_var, scale_var)
 		placed.append(decor)
 		building_tiles[ground_pos] = true
@@ -1349,8 +1351,8 @@ func _place_decor_on_ground(grid_data: Dictionary, decor_models: Array, building
 			break
 		if not _is_valid_decor_position(ground_pos, grid_data, building_tiles, all_decor):
 			continue
-		var model_info = decor_models[randi() % decor_models.size()]
-		var anchor = decor_anchor_points_enabled[randi() % decor_anchor_points_enabled.size()] if decor_anchor_points_enabled.size() > 0 else "center"
+		var model_info = decor_models[_rng.randi() % decor_models.size()]
+		var anchor = decor_anchor_points_enabled[_rng.randi() % decor_anchor_points_enabled.size()] if decor_anchor_points_enabled.size() > 0 else "center"
 		var world_x = ground_pos.x * tile_size.x + city_offset.x
 		var world_z = ground_pos.y * tile_size.z + city_offset.z
 		var mesh_sz: Vector3 = _model_footprints.get(model_info.path, Vector3(0.5, 0.5, 0.5))
@@ -1358,7 +1360,7 @@ func _place_decor_on_ground(grid_data: Dictionary, decor_models: Array, building
 		if mesh_sz.x > 0.6 or mesh_sz.z > 0.6:
 			max_decor_scale = minf(1.15, (tile_size.x * 0.85) / maxf(mesh_sz.x, mesh_sz.z))
 		max_decor_scale = maxf(max_decor_scale, 0.85)
-		var scale_var = randf_range(0.85, max_decor_scale)
+		var scale_var = _rng.randf_range(0.85, max_decor_scale)
 		var base_pos = Vector3(world_x, _ground_y_for_model(model_info.path, scale_var, 0.0), world_z)
 		var offset = _get_anchor_offset(anchor, tile_size)
 		var decor_pos = base_pos + offset
@@ -1369,7 +1371,7 @@ func _place_decor_on_ground(grid_data: Dictionary, decor_models: Array, building
 		decor.anchor_point = anchor
 		decor.grid_position = ground_pos
 		decor.occupied_rect = Rect2(ground_pos.x - decor_spacing_tiles, ground_pos.y - decor_spacing_tiles, 1 + (decor_spacing_tiles * 2), 1 + (decor_spacing_tiles * 2))
-		decor.rotation_y = float((randi() % 4) * 90)
+		decor.rotation_y = float((_rng.randi() % 4) * 90)
 		decor.scale = Vector3(scale_var, scale_var, scale_var)
 		all_decor.append(decor)
 		building_tiles[ground_pos] = true
@@ -1391,44 +1393,53 @@ func _is_valid_decor_position(pos: Vector2i, grid_data: Dictionary, building_til
 # ============================================================================
 # Helpers
 # ============================================================================
+# NOTE: exported games do not contain the source .glb files (only their imported
+# versions), so FileAccess/DirAccess would find nothing there. ResourceLoader.exists()
+# and ResourceLoader.list_directory() see imported resources in both editor and export.
 func _validate_paths(ground_path: String, road_straight_path: String, road_corner_path: String) -> bool:
 	var errors: Array = []
-	if not FileAccess.file_exists(ground_path):
+	if not ResourceLoader.exists(ground_path):
 		errors.append("Ground tile not found: " + ground_path)
-	if not FileAccess.file_exists(road_straight_path):
+	if not ResourceLoader.exists(road_straight_path):
 		errors.append("Road straight not found: " + road_straight_path)
-	if use_corner_pieces and not FileAccess.file_exists(road_corner_path):
+	if use_corner_pieces and not ResourceLoader.exists(road_corner_path):
 		push_warning("[CityGenerator] Road corner not found, disabling corners: " + road_corner_path)
 		use_corner_pieces = false
-	if not DirAccess.dir_exists_absolute(base_folder_path):
-		errors.append("Base folder not found: " + base_folder_path)
-	if generate_buildings and not DirAccess.dir_exists_absolute(building_models_folder):
-		errors.append("Building folder not found: " + building_models_folder)
-	if generate_decor and not DirAccess.dir_exists_absolute(decor_models_folder):
-		errors.append("Decor folder not found: " + decor_models_folder)
+	if generate_buildings and _list_models(building_models_folder).is_empty():
+		errors.append("No building models found in: " + building_models_folder)
+	if generate_decor and _list_models(decor_models_folder).is_empty():
+		errors.append("No decor models found in: " + decor_models_folder)
 	if errors.size() > 0:
 		for error in errors:
 			push_error(error)
 		return false
 	return true
 
+## Full paths of every .glb model directly inside folder (works in exported builds).
+func _list_models(folder: String) -> PackedStringArray:
+	var out := PackedStringArray()
+	for file_name in ResourceLoader.list_directory(folder):
+		if file_name.ends_with(".glb"):
+			out.append(folder.path_join(file_name))
+	return out
+
 func _load_models(ground_path: String, road_straight_path: String, road_corner_path: String, road_junction_path: String = "", road_tsplit_path: String = "") -> Dictionary:
 	var models = {"ground": null, "road_straight": null, "road_corner": null, "road_junction": null, "road_tsplit": null, "buildings": [], "decor": []}
 	models.ground = load(ground_path)
 	models.road_straight = load(road_straight_path)
 	if use_corner_pieces:
-		if FileAccess.file_exists(road_corner_path):
+		if ResourceLoader.exists(road_corner_path):
 			models.road_corner = load(road_corner_path)
 		else:
 			use_corner_pieces = false
 	if use_junction_pieces and road_junction_path != "":
-		if FileAccess.file_exists(road_junction_path):
+		if ResourceLoader.exists(road_junction_path):
 			models.road_junction = load(road_junction_path)
 		else:
 			push_warning("[CityGenerator] Junction not found, using straight: " + road_junction_path)
 			use_junction_pieces = false
 	if use_tsplit_pieces and road_tsplit_path != "":
-		if FileAccess.file_exists(road_tsplit_path):
+		if ResourceLoader.exists(road_tsplit_path):
 			models.road_tsplit = load(road_tsplit_path)
 		else:
 			push_warning("[CityGenerator] TSplit not found, using straight: " + road_tsplit_path)
@@ -1437,29 +1448,15 @@ func _load_models(ground_path: String, road_straight_path: String, road_corner_p
 		push_error("[CityGenerator] Could not load base models")
 		return {}
 	if generate_buildings:
-		var building_dir = DirAccess.open(building_models_folder)
-		if building_dir:
-			building_dir.list_dir_begin()
-			var file_name = building_dir.get_next()
-			while file_name != "":
-				if file_name.ends_with(".glb") and not building_dir.current_is_dir():
-					var full_path = building_models_folder.path_join(file_name)
-					var model = load(full_path)
-					if model:
-						models.buildings.append({"path": full_path, "scene": model, "name": _extract_model_name(file_name)})
-				file_name = building_dir.get_next()
+		for full_path in _list_models(building_models_folder):
+			var model = load(full_path)
+			if model:
+				models.buildings.append({"path": full_path, "scene": model, "name": _extract_model_name(full_path.get_file())})
 	if generate_decor:
-		var decor_dir = DirAccess.open(decor_models_folder)
-		if decor_dir:
-			decor_dir.list_dir_begin()
-			var file_name = decor_dir.get_next()
-			while file_name != "":
-				if file_name.ends_with(".glb") and not decor_dir.current_is_dir():
-					var full_path = decor_models_folder.path_join(file_name)
-					var model = load(full_path)
-					if model:
-						models.decor.append({"path": full_path, "scene": model, "name": _extract_model_name(file_name)})
-				file_name = decor_dir.get_next()
+		for full_path in _list_models(decor_models_folder):
+			var model = load(full_path)
+			if model:
+				models.decor.append({"path": full_path, "scene": model, "name": _extract_model_name(full_path.get_file())})
 	return models
 
 func _calculate_lane_positions(num_lanes: int, grid_size: int) -> PackedInt32Array:

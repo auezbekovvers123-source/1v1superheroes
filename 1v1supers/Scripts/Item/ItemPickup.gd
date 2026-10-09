@@ -1,23 +1,24 @@
 extends Area3D
 class_name ItemPickup
-## ItemPickup.gd — World item that player can pick up to equip wearable
-## Auto-bob + rotate, triggers on body_entered. Supports respawn.
+## World item: bobs and spins until a player picks it up into their hand
+## (the player's "interact" action calls try_interact), or on touch when
+## auto_pickup is on.
 
 signal picked_up(picker: Node, item_id: String)
 
 @export_group("Item")
+@export var item_data: ItemData ## The item this pickup gives. Preferred over the fields below.
 @export var item_name: String = "Cloak"
 @export var item_id: String = "cloak_01"
 @export var wearable_scene: PackedScene
 @export var equip_slot: int = 1 # ItemData.EquipSlot.CAPE
 @export var bone_name: String = "spine_03.x"
 @export var pickup_color: Color = Color(0.78, 0.12, 0.12, 1)
-@export var item_data: ItemData  ## Link to ItemData resource for inventory system
 
 @export_group("Pickup")
 @export var auto_pickup: bool = false
 @export var require_interact: bool = true
-@export var respawn_time: float = 0.0 # 0 = no respawn, destroy
+@export var respawn_time: float = 0.0 # 0 = no respawn, freed after pickup
 @export var pickup_radius: float = 2.0
 @export var bob_amplitude: float = 0.18
 @export var bob_speed: float = 1.6
@@ -28,194 +29,93 @@ var _mesh: MeshInstance3D = null
 var _base_y: float = 0.0
 var _time: float = 0.0
 var _picked: bool = false
-var _inside_bodies: Array[Node3D] = []
 
 func _ready() -> void:
-	# Ensure monitoring
 	monitoring = true
 	monitorable = true
 	collision_layer = 0
-	collision_mask = 1 # player on layer 1
-	# Find mesh for bobbing
+	collision_mask = 1 # fighters are on layer 1
 	_mesh = find_child("PickupMesh", true, false) as MeshInstance3D
 	if _mesh == null:
-		_mesh = get_node_or_null("MeshInstance3D") as MeshInstance3D
-	if _mesh == null:
-		for c in get_children():
-			if c is MeshInstance3D:
-				_mesh = c as MeshInstance3D
-				break
-	# Setup collision shape if missing
+		_mesh = RagdollController._find_first(self, "MeshInstance3D") as MeshInstance3D
 	var col_shape := get_node_or_null("CollisionShape3D") as CollisionShape3D
 	if col_shape == null:
 		col_shape = CollisionShape3D.new()
 		col_shape.name = "CollisionShape3D"
-		var sph := SphereShape3D.new()
-		sph.radius = pickup_radius
-		col_shape.shape = sph
+		col_shape.shape = SphereShape3D.new()
 		add_child(col_shape)
-		col_shape.owner = owner if owner else self
-	else:
-		if col_shape.shape is SphereShape3D:
-			(col_shape.shape as SphereShape3D).radius = pickup_radius
-	# Remember base y for bob
-	_base_y = position.y
+	if col_shape.shape is SphereShape3D:
+		(col_shape.shape as SphereShape3D).radius = pickup_radius
 	if _mesh:
 		_base_y = _mesh.position.y
-		# Ensure pickup mesh uses pickup_scale (world view) even if wearable scale differs
 		_mesh.scale = pickup_scale
-		# Apply color if material is ShaderMaterial
 		var mat := _mesh.material_override as ShaderMaterial
-		if mat == null:
-			mat = _mesh.get_surface_override_material(0) as ShaderMaterial
-		if mat and mat.has_method("set_shader_parameter"):
-			# try set color
-			if mat.shader and "color" in mat.shader.get_shader_uniform_list().map(func(u): return u.name):
-				mat.set_shader_parameter("color", pickup_color)
-	connect("body_entered", _on_body_entered)
-	connect("body_exited", _on_body_exited)
+		if mat and mat.shader and mat.shader.get_shader_uniform_list().any(func(u): return u.name == "color"):
+			mat.set_shader_parameter("color", pickup_color)
+	body_entered.connect(_on_body_entered)
 	add_to_group("pickup")
-	add_to_group("item_pickup")
 
 func _process(delta: float) -> void:
-	if _picked and respawn_time <= 0.0:
+	if _picked or _mesh == null:
 		return
 	_time += delta
-	if _mesh and not _picked:
-		# Bob
-		var y_off: float = sin(_time * bob_speed) * bob_amplitude
-		_mesh.position.y = _base_y + y_off
-		# Rotate
-		_mesh.rotation.y += deg_to_rad(rotation_speed) * delta
-	# Interact check
-	if require_interact and not auto_pickup and not _picked:
-		if _inside_bodies.size() > 0 and (Input.is_key_pressed(KEY_F) or (InputMap.has_action("interact") and Input.is_action_just_pressed("interact"))):
-			for body in _inside_bodies:
-				if _is_player(body):
-					if body.has_method("_try_interact_pickup"):
-						body.call("_try_interact_pickup")
-					else:
-						_try_pickup(body)
-					break
+	_mesh.position.y = _base_y + sin(_time * bob_speed) * bob_amplitude
+	_mesh.rotation.y += deg_to_rad(rotation_speed) * delta
 
 func _on_body_entered(body: Node3D) -> void:
-	if _picked:
-		return
-	if not _is_player(body):
-		return
-	if not _inside_bodies.has(body):
-		_inside_bodies.append(body)
-	if auto_pickup and not require_interact:
-		_try_pickup(body)
-	# else wait for interact
+	if auto_pickup and not require_interact and body is Player:
+		try_interact(body)
 
-func _on_body_exited(body: Node3D) -> void:
-	_inside_bodies.erase(body)
+func is_pickable() -> bool:
+	return not _picked and visible
 
-func _is_player(body: Node) -> bool:
-	if body == null:
-		return false
-	# Check group or method
-	if body.is_in_group("player"):
-		return true
-	if body.is_in_group("fighter") and body is CharacterBody3D:
-		# Assume player if it has equipment/cloak logic
-		if body.has_method("equip_cloak") or body.has_method("toggle_cloak") or body.get_node_or_null("Equipment") != null:
-			return true
-		# Fallback: name == Player
-		if body.name == "Player":
-			return true
-	return false
-
-func _get_or_create_item_data() -> ItemData:
-	if item_data != null:
-		return item_data
-	if item_id == "cloak_01" or (wearable_scene != null and "Cloak" in wearable_scene.resource_path):
-		var res = load("res://Assets/Item/Cloak Assets/cloak_item.tres")
-		if res is ItemData:
-			item_data = res
-			return item_data
-	var data := ItemData.new()
-	data.id = item_id
-	data.display_name = item_name
-	data.slot = equip_slot as ItemData.EquipSlot
-	data.scene = wearable_scene
-	data.bone_name = bone_name
-	data.preview_color = pickup_color
-	# infer hand item if not cape
-	if equip_slot == ItemData.EquipSlot.HAND or wearable_scene == null:
-		data.is_holdable = true
-		data.slot = ItemData.EquipSlot.HAND
-		data.type = ItemData.ItemType.HOLDABLE
-		if item_id.begins_with("usable"):
-			data.is_usable = true
-	item_data = data
+## The item this pickup represents (built from the export fields if item_data is unset).
+func get_item_data() -> ItemData:
+	if item_data == null:
+		var data := ItemData.new()
+		data.id = item_id
+		data.display_name = item_name
+		data.slot = equip_slot as ItemData.EquipSlot
+		data.scene = wearable_scene
+		data.bone_name = bone_name
+		data.preview_color = pickup_color
+		if equip_slot == ItemData.EquipSlot.HAND or wearable_scene == null:
+			data.is_holdable = true
+			data.slot = ItemData.EquipSlot.HAND
+			data.type = ItemData.ItemType.HOLDABLE
+			data.is_usable = item_id.begins_with("usable")
+		item_data = data
 	return item_data
 
-func _try_pickup(body: Node) -> bool:
+## Puts the item into `picker`'s hand. Wearables (the cape) also go to the hand
+## first; they are worn by dragging them onto a slot in the inventory (TAB).
+func try_interact(picker: Player) -> bool:
 	if _picked:
 		return false
-	var data := _get_or_create_item_data()
-	# Cape is now just like any other item: must go into HAND first.
-	# Wearable equip happens ONLY via InventoryUI drag & drop (HAND -> CAPE slot).
-	# Do NOT auto-equip wearables on pickup — HAND must not be busy.
-	var inv = body.get_node_or_null("Inventory")
-	if inv and inv.has_method("can_pickup"):
-		if not inv.can_pickup():
-			print("[Pickup] HAND full - cannot pick '%s' (drop current first with G / Inventory)" % data.display_name)
-			if body.has_method("_on_hand_full_feedback"):
-				body.call("_on_hand_full_feedback")
-			return false
-	if inv and inv.has_method("add_item"):
-		inv.add_item(data)
-		if body.has_method("attach_held_item"):
-			body.call("attach_held_item", data)
-		_do_pickup_effect(body)
-		return true
-	# fallback direct attach without inventory (no Inventory node)
-	if body.has_method("attach_held_item"):
-		var ok: bool = body.call("attach_held_item", data)
-		if ok:
-			_do_pickup_effect(body)
-			return true
-	return false
+	if not picker.hand.pick_up(get_item_data()):
+		return false
+	_take(picker)
+	return true
 
-func _force_equip(body: Node) -> bool:
-	# Last resort: try calling equip_cloak directly even if method check failed
-	if body.has_method("equip_cloak"):
-		body.call("equip_cloak")
-		return true
-	return false
+## Removes the item from the world without giving it to anyone here (someone
+## on another machine picked it up).
+func take_away() -> void:
+	if not _picked:
+		_take(null)
 
-func _find_skeleton(root: Node) -> Skeleton3D:
-	if root is Skeleton3D:
-		return root as Skeleton3D
-	for c in root.get_children():
-		var r: Skeleton3D = _find_skeleton(c)
-		if r:
-			return r
-	return null
-
-func _do_pickup_effect(picker: Node) -> void:
+func _take(picker: Player) -> void:
 	_picked = true
 	picked_up.emit(picker, item_id)
-	print("[Pickup] %s picked up by %s" % [item_name, picker.name])
-	# Visual feedback
+	set_deferred("monitoring", false)
 	if _mesh:
 		var tw := create_tween()
-		if tw:
-			tw.tween_property(_mesh, "scale", Vector3.ZERO, 0.2).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
-			tw.parallel().tween_property(_mesh, "position:y", _mesh.position.y + 1.0, 0.25)
-	# Disable collision
-	set_deferred("monitoring", false)
-	visible = false
-	# Respawn or free
+		tw.tween_property(_mesh, "scale", Vector3.ZERO, 0.2).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+		tw.parallel().tween_property(_mesh, "position:y", _mesh.position.y + 1.0, 0.25)
 	if respawn_time > 0.0:
-		await get_tree().create_timer(respawn_time).timeout
-		_respawn()
+		get_tree().create_timer(0.25).timeout.connect(func(): visible = false)
+		get_tree().create_timer(respawn_time).timeout.connect(_respawn)
 	else:
-		await get_tree().create_timer(0.35).timeout
-		queue_free()
+		get_tree().create_timer(0.35).timeout.connect(queue_free)
 
 func _respawn() -> void:
 	_picked = false
@@ -223,9 +123,4 @@ func _respawn() -> void:
 	set_deferred("monitoring", true)
 	if _mesh:
 		_mesh.scale = pickup_scale
-		_mesh.visible = true
-
-func try_interact(interactor: Node) -> bool:
-	if _picked:
-		return false
-	return _try_pickup(interactor)
+		_mesh.position.y = _base_y

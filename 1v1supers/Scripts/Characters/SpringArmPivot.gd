@@ -1,6 +1,7 @@
 extends Node3D
-## SpringArmPivot.gd — mouse look + SATISFYING camera feedback
-## Adds trauma-based shake, FOV kick, hitstop-friendly damping
+class_name SpringArmPivot
+## Third-person camera rig: mouse look (local player only), trauma-based shake,
+## FOV kicks, over-the-shoulder aim, and the TAB inventory front view.
 
 @export_group("FOV")
 @export var change_fov_on_run: bool = true
@@ -68,23 +69,31 @@ var _kick_decay: float = 9.0
 var _recoil_pitch: float = 0.0
 var aiming: bool = false
 
+## Set by the Player each frame: widen the FOV for running.
+var run_fov_active: bool = false
+## Only the local human's rig reads the mouse and owns the screen.
+var is_local: bool = false
+
 func set_aiming(on: bool) -> void:
 	aiming = on
 
+## Makes this the active camera with mouse look (local human) or a passive rig (AI/remote).
+func set_local(on: bool) -> void:
+	is_local = on
+	set_process_unhandled_input(on)
+	if camera:
+		camera.current = on
+	if on:
+		Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+
 func _ready():
-	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
 	if spring_arm:
 		_base_spring_length = spring_arm.spring_length
-	if camera == null:
-		camera = get_node_or_null("SpringArm3D/CameraHolder/Camera3D") as Camera3D
 
 ## Walk the player's visual subtree and gather every mesh's world-space AABB,
 ## then pick a spring-arm distance + pitch so the model fills the frame.
 func _compute_inventory_fit() -> void:
-	if owner == null or not (owner is Node):
-		_fit_active = false
-		return
-	var mesh_root := (owner as Node).get_node_or_null("Mesh") as Node3D
+	var mesh_root := get_parent().get_node_or_null("Mesh") as Node3D
 	if mesh_root == null:
 		_fit_active = false
 		return
@@ -166,7 +175,6 @@ func _unhandled_input(event):
 		if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 			return
 		var sens: float = 0.005
-		# Reduce sensitivity during hitstop (time_scale small) — keep feeling
 		rotate_y(-event.relative.x * sens)
 		spring_arm.rotate_x(-event.relative.y * sens)
 		spring_arm.rotation.x = clamp(spring_arm.rotation.x, -PI/4, PI/4)
@@ -179,13 +187,10 @@ func _unhandled_input(event):
 func _physics_process(delta: float):
 	# --- Inventory front view: smoothly orbit to face the character's front ---
 	if inventory_mode:
-		# If we couldn't compute a fit on the open call (owner not set yet, etc.),
-		# try again now that we're alive in the tree.
+		# If the fit could not be computed on open, try again now.
 		if inventory_auto_fit and not _fit_active:
 			_compute_inventory_fit()
-		var mesh_root: Node3D = null
-		if owner is Node:
-			mesh_root = owner.get_node_or_null("Mesh") as Node3D
+		var mesh_root := get_parent().get_node_or_null("Mesh") as Node3D
 		var fwd := Vector3.FORWARD
 		if mesh_root:
 			fwd = mesh_root.global_transform.basis.z
@@ -216,12 +221,7 @@ func _physics_process(delta: float):
 			camera.fov = lerpf(camera.fov, target_fov, t)
 		return
 
-	# Use unscaled delta for shake so hitstop still shakes
-	var udelta: float = delta
-	if Engine.time_scale < 0.5:
-		udelta = delta / max(Engine.time_scale, 0.02) * delta # approximate unscaled
-		udelta = clamp(udelta, 0.0, 0.032)
-	_noise_time += udelta * shake_freq
+	_noise_time += delta * shake_freq
 	# Decay trauma
 	if trauma > 0.0:
 		trauma = max(trauma - trauma_decay * delta, 0.0)
@@ -234,9 +234,9 @@ func _physics_process(delta: float):
 	if camera:
 		# Aim over-the-shoulder offset (lerp so it eases in/out, doesn't fight shake yaw/roll)
 		if aiming:
-			camera.position = camera.position.lerp(aim_cam_offset, clampf(aim_cam_blend * udelta, 0.0, 1.0))
+			camera.position = camera.position.lerp(aim_cam_offset, clampf(aim_cam_blend * delta, 0.0, 1.0))
 		else:
-			camera.position = camera.position.lerp(Vector3.ZERO, clampf(aim_cam_blend * udelta, 0.0, 1.0))
+			camera.position = camera.position.lerp(Vector3.ZERO, clampf(aim_cam_blend * delta, 0.0, 1.0))
 		var shake_amount: float = pow(trauma, trauma_power)
 		# Perlin-ish via sin hash
 		var yaw: float = sin(_noise_time * 1.37) * cos(_noise_time * 0.77) * deg_to_rad(max_yaw_shake) * shake_amount
@@ -257,17 +257,11 @@ func _physics_process(delta: float):
 		var target_fov: float = normal_fov
 		if aiming:
 			target_fov = aim_fov
-		elif change_fov_on_run and owner and owner is CharacterBody3D and (owner as CharacterBody3D).is_on_floor():
-			var owner_carrying: bool = owner.has_method("is_carrying_body") and bool(owner.call("is_carrying_body"))
-			if Input.is_action_pressed("run") and (owner as CharacterBody3D).velocity.length() > 0.6 and not (owner as CharacterBody3D).get("is_attacking") and not owner_carrying:
-				target_fov = run_fov
+		elif change_fov_on_run and run_fov_active:
+			target_fov = run_fov
 		target_fov += _fov_kick
 		# During attack, slight FOV tighten on windup then kick on hit is via _fov_kick
 		camera.fov = lerp(camera.fov, target_fov, CAMERA_BLEND + trauma * 0.12)
 		# Spring length punch on hit (forward)
 		var target_len: float = _base_spring_length + trauma * 0.55 + _fov_kick * 0.04
 		spring_arm.spring_length = lerp(spring_arm.spring_length, target_len, 0.18)
-
-func _process(_delta):
-	# Keep shake in _physics but also smooth in _process for 60fps feel
-	pass
