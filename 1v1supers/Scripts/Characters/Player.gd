@@ -147,6 +147,10 @@ func _ready() -> void:
 	collision_layer = 1
 	collision_mask = 1
 	_spawn_point = global_position + Vector3.UP * respawn_height
+	# The camera arm must never stop on our own body. Jolt moves it at the next
+	# step, so at super speed it lags a tick behind the arm's start and the
+	# arm would collapse onto our back.
+	camera_rig.spring_arm.add_excluded_object(get_rid())
 	_setup_components()
 	_states = {
 		&"free": FreeState.new(self, &"free"),

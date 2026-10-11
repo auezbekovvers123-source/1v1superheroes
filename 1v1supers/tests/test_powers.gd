@@ -7,6 +7,7 @@ const CLOAK := "res://Assets/Item/Cloak Assets/cloak_item.tres"
 
 var dummy: Dummy
 var hud: CombatHUD
+var _run_cam_dist := 0.0 # camera arm length at the end of the last _run_speed
 
 func run() -> void:
 	await load_level()
@@ -36,6 +37,7 @@ func run() -> void:
 	check(hud._powers_label.visible and "Super speed" in hud._powers_label.text, "the HUD shows how to use it")
 	var fast_run := await _run_speed()
 	check(fast_run > 15.0, "super speed sprint: %.1f m/s (normal %.1f)" % [fast_run, plain_run])
+	near(_run_cam_dist, player.camera_rig.spring_arm.spring_length, 0.05, "the camera stays back at super speed (arm m)")
 	check(player.get_node_or_null("SpeedSparks") != null, "sparks fly off the runner")
 	await place_player(Vector3(-22, 0.05, -20))
 	var p0 := player.global_position
@@ -173,6 +175,7 @@ func _run_speed() -> float:
 	pin.hold(&"run", true)
 	await seconds(1.5)
 	var v := Vector2(player.velocity.x, player.velocity.z).length()
+	_run_cam_dist = player.camera_rig.spring_arm.get_hit_length()
 	pin.reset()
 	await seconds(0.5)
 	return v
