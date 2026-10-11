@@ -83,7 +83,7 @@ you have and their keys, bottom left.
 | Item | Slot | Power |
 |---|---|---|
 | Cape | cape | **Flight** — R takes off (from the ground too), or jump twice. Space up, C down, Shift for a fast superman flight |
-| Speed boots | boots | **Super speed** — Shift sprints at 17 m/s instead of 5, leaving an afterimage trail; the dodge becomes a long dash |
+| Speed boots | boots | **Super speed** — Shift sprints at 17 m/s instead of 5, crackling with lightning and leaving a trail of phantom copies of yourself; the dodge becomes a long dash |
 | Laser visor | helmet | **Laser eyes** — hold right mouse to aim, then left mouse: a heat beam from the eyes to the crosshair, 30 damage a second while it burns 20 stamina a second; walls stop it |
 
 Powers stack (cape + boots + visor at once). They work online too: the other

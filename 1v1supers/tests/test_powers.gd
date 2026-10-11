@@ -9,6 +9,7 @@ var dummy: Dummy
 var hud: CombatHUD
 var _run_cam_dist := 0.0 # camera arm length at the end of the last _run_speed
 var _run_trail := {} # the afterimages behind the runner at the end of it
+var _run_bolts := 0 # lightning bolts on the runner at the end of it
 
 func run() -> void:
 	await load_level()
@@ -43,7 +44,7 @@ func run() -> void:
 	check(_run_trail.bones == [player.get_skeleton().get_bone_count()], "each one is the model on a frozen copy of its skeleton")
 	check(_run_trail.meshes == player.get_skeleton().find_children("*", "MeshInstance3D", true, false).size(), "with every body and gear mesh")
 	check(_run_trail.behind, "left behind the runner")
-	check(player.get_node_or_null("SpeedSparks") != null, "sparks fly off the runner")
+	check(_run_bolts >= SpeedLightning.BODY_BOLTS + SpeedLightning.TRAIL_BOLTS, "lightning crackles off the runner (%d bolts)" % _run_bolts)
 	await place_player(Vector3(-22, 0.05, -20))
 	var p0 := player.global_position
 	pin.set_move(Vector2(0, -1))
@@ -58,7 +59,7 @@ func run() -> void:
 	check(dash > 3.53 * 1.8, "the dodge becomes a long dash: %.2f m (normal 3.53)" % dash)
 	player.unequip_to_hand(ItemData.EquipSlot.BOOTS)
 	await frames(2)
-	check(not player.powers.has("speed") and player.get_node_or_null("SpeedSparks") == null, "boots off: power gone")
+	check(not player.powers.has("speed") and player.get_node_or_null("SpeedLightning") == null, "boots off: power gone")
 	near(await _run_speed(), plain_run, 0.1, "back to the normal run")
 	player.inventory.clear()
 
@@ -181,6 +182,8 @@ func _run_speed() -> float:
 	await seconds(1.5)
 	var v := Vector2(player.velocity.x, player.velocity.z).length()
 	_run_cam_dist = player.camera_rig.spring_arm.get_hit_length()
+	var lightning := player.get_node_or_null("SpeedLightning") as SpeedLightning
+	_run_bolts = lightning.bolt_count() if lightning else 0
 	var ghosts := get_nodes_in_group("afterimage")
 	_run_trail = {"count": ghosts.size(), "bones": [], "meshes": 0, "behind": false}
 	if not ghosts.is_empty():

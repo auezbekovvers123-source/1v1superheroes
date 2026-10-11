@@ -1,7 +1,8 @@
 extends Power
 class_name SuperSpeedPower
-## Speed boots: hold Shift to run at super speed, leaving a trail of phantom
-## copies of yourself; the dodge (Ctrl) becomes a long dash.
+## Speed boots: hold Shift to run at super speed, crackling with lightning and
+## leaving a trail of phantom copies of yourself; the dodge (Ctrl) becomes a
+## long dash.
 
 const RUN_SPEED := 17.0 # m/s (a normal run is 5)
 const DASH_SCALE := 2.2
@@ -12,16 +13,18 @@ const STREAK_COLOR := Color(1.0, 0.6, 0.15)
 const AFTERIMAGE_SHADER := preload("res://Assets/Shaders/afterimage.gdshader")
 
 var _streak_timer: float = 0.0
-var _sparks: GPUParticles3D = null
+var _lightning: SpeedLightning = null
 
 func added() -> void:
-	_sparks = _make_sparks()
-	player.add_child(_sparks)
+	_lightning = SpeedLightning.new()
+	_lightning.name = "SpeedLightning"
+	_lightning.runner = player
+	player.add_child(_lightning)
 
 func removed() -> void:
-	if _sparks and is_instance_valid(_sparks):
-		_sparks.queue_free()
-	_sparks = null
+	if _lightning and is_instance_valid(_lightning):
+		_lightning.queue_free()
+	_lightning = null
 
 func run_speed() -> float:
 	return RUN_SPEED
@@ -32,8 +35,8 @@ func dash_scale() -> float:
 func physics_update(delta: float) -> void:
 	var flat := Vector2(player.velocity.x, player.velocity.z)
 	var fast := flat.length() > STREAK_MIN_SPEED and not player.is_dead()
-	if _sparks:
-		_sparks.emitting = fast
+	if _lightning:
+		_lightning.active = fast
 	if not fast:
 		_streak_timer = 0.0
 		return
@@ -99,37 +102,3 @@ static func _freeze(src: Skeleton3D, parent: Node3D) -> Skeleton3D:
 	parent.add_child(s)
 	s.global_transform = src.global_transform
 	return s
-
-## Little electric streaks crackling off the runner.
-func _make_sparks() -> GPUParticles3D:
-	var p := GPUParticles3D.new()
-	p.name = "SpeedSparks"
-	p.amount = 40
-	p.lifetime = 0.25
-	p.local_coords = false
-	p.emitting = false
-	p.position = Vector3(0, 0.9, 0)
-	p.transform_align = GPUParticles3D.TRANSFORM_ALIGN_Z_BILLBOARD_Y_TO_VELOCITY
-	var m := ParticleProcessMaterial.new()
-	m.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
-	m.emission_box_extents = Vector3(0.3, 0.8, 0.3)
-	m.direction = Vector3(0, 1, 0)
-	m.spread = 180.0
-	m.initial_velocity_min = 2.0
-	m.initial_velocity_max = 5.0
-	m.gravity = Vector3.ZERO
-	m.damping_min = 8.0
-	m.damping_max = 12.0
-	m.color = Color(1.0, 0.9, 0.35)
-	p.process_material = m
-	var streak := QuadMesh.new()
-	streak.size = Vector2(0.025, 0.22)
-	var qm := StandardMaterial3D.new()
-	qm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	qm.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-	qm.vertex_color_use_as_albedo = true
-	qm.albedo_color = Color(1.0, 0.95, 0.6)
-	qm.cull_mode = BaseMaterial3D.CULL_DISABLED
-	streak.material = qm
-	p.draw_pass_1 = streak
-	return p
