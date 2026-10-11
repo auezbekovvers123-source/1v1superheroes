@@ -8,6 +8,7 @@ const CLOAK := "res://Assets/Item/Cloak Assets/cloak_item.tres"
 var dummy: Dummy
 var hud: CombatHUD
 var _run_cam_dist := 0.0 # camera arm length at the end of the last _run_speed
+var _run_trail := {} # the afterimages behind the runner at the end of it
 
 func run() -> void:
 	await load_level()
@@ -38,6 +39,10 @@ func run() -> void:
 	var fast_run := await _run_speed()
 	check(fast_run > 15.0, "super speed sprint: %.1f m/s (normal %.1f)" % [fast_run, plain_run])
 	near(_run_cam_dist, player.camera_rig.spring_arm.spring_length, 0.05, "the camera stays back at super speed (arm m)")
+	check(_run_trail.count >= 4, "a trail of afterimages (%d)" % _run_trail.count)
+	check(_run_trail.bones == [player.get_skeleton().get_bone_count()], "each one is the model on a frozen copy of its skeleton")
+	check(_run_trail.meshes == player.get_skeleton().find_children("*", "MeshInstance3D", true, false).size(), "with every body and gear mesh")
+	check(_run_trail.behind, "left behind the runner")
 	check(player.get_node_or_null("SpeedSparks") != null, "sparks fly off the runner")
 	await place_player(Vector3(-22, 0.05, -20))
 	var p0 := player.global_position
@@ -176,6 +181,15 @@ func _run_speed() -> float:
 	await seconds(1.5)
 	var v := Vector2(player.velocity.x, player.velocity.z).length()
 	_run_cam_dist = player.camera_rig.spring_arm.get_hit_length()
+	var ghosts := get_nodes_in_group("afterimage")
+	_run_trail = {"count": ghosts.size(), "bones": [], "meshes": 0, "behind": false}
+	if not ghosts.is_empty():
+		var newest: Node3D = ghosts[-1]
+		for sk: Skeleton3D in newest.find_children("*", "Skeleton3D", true, false):
+			_run_trail.bones.append(sk.get_bone_count())
+		_run_trail.meshes = newest.find_children("*", "MeshInstance3D", true, false).size()
+		var oldest_sk := (ghosts[0] as Node3D).find_children("*", "Skeleton3D", true, false)
+		_run_trail.behind = not oldest_sk.is_empty() and (oldest_sk[0] as Node3D).global_position.x < player.global_position.x - 1.0
 	pin.reset()
 	await seconds(0.5)
 	return v
