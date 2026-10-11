@@ -25,7 +25,7 @@ signal picked_up(picker: Node, item_id: String)
 @export var rotation_speed: float = 45.0 # degrees per second
 @export var pickup_scale: Vector3 = Vector3(0.145, 0.145, 0.145) # world display scale
 
-var _mesh: MeshInstance3D = null
+var _mesh: Node3D = null # the visual that bobs and spins: a mesh or a group of them
 var _base_y: float = 0.0
 var _time: float = 0.0
 var _picked: bool = false
@@ -35,7 +35,7 @@ func _ready() -> void:
 	monitorable = true
 	collision_layer = 0
 	collision_mask = 1 # fighters are on layer 1
-	_mesh = find_child("PickupMesh", true, false) as MeshInstance3D
+	_mesh = find_child("PickupMesh", true, false) as Node3D
 	if _mesh == null:
 		_mesh = RagdollController._find_first(self, "MeshInstance3D") as MeshInstance3D
 	var col_shape := get_node_or_null("CollisionShape3D") as CollisionShape3D
@@ -49,7 +49,7 @@ func _ready() -> void:
 	if _mesh:
 		_base_y = _mesh.position.y
 		_mesh.scale = pickup_scale
-		var mat := _mesh.material_override as ShaderMaterial
+		var mat := (_mesh as MeshInstance3D).material_override as ShaderMaterial if _mesh is MeshInstance3D else null
 		if mat and mat.shader and mat.shader.get_shader_uniform_list().any(func(u): return u.name == "color"):
 			mat.set_shader_parameter("color", pickup_color)
 	body_entered.connect(_on_body_entered)
@@ -92,7 +92,7 @@ func get_item_data() -> ItemData:
 func try_interact(picker: Player) -> bool:
 	if _picked:
 		return false
-	if not picker.hand.pick_up(get_item_data()):
+	if not picker.take_from_world(get_item_data()):
 		return false
 	_take(picker)
 	return true

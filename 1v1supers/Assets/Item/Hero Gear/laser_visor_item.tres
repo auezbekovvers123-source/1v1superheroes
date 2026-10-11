@@ -1,0 +1,21 @@
+[gd_resource type="Resource" script_class="ItemData" format=3]
+
+[ext_resource type="Script" path="res://Scripts/Item/ItemData.gd" id="1_data"]
+[ext_resource type="PackedScene" path="res://Scenes/Items/LaserVisor.tscn" id="2_scene"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_visor"]
+size = Vector3(0.24, 0.075, 0.06)
+
+[resource]
+script = ExtResource("1_data")
+id = "laser_visor"
+display_name = "Laser Visor"
+description = "A visor with a ruby lens. Worn: LASER EYES - hold right mouse to aim, then left mouse to fire a heat beam."
+slot = 2
+scene = ExtResource("2_scene")
+mesh = SubResource("BoxMesh_visor")
+bone_name = "head.x"
+preview_color = Color(1, 0.12, 0.08, 1)
+is_holdable = true
+power_id = "laser"
+power_name = "Laser eyes"

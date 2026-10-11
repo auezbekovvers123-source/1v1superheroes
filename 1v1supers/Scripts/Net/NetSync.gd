@@ -149,7 +149,8 @@ func _route_hit(hit: HitInfo) -> bool:
 	if attacker == null or not player.health.can_take_damage():
 		return false # world damage to a puppet is its owner's call
 	# One report per swing until the owner's answer comes back
-	player.health.set_invulnerable(player.health.invuln_time)
+	if hit.kind != HitInfo.Kind.ENERGY:
+		player.health.set_invulnerable(player.health.invuln_time)
 	net.send_hit(peer_id, NetCodec.encode_hit(hit, net.my_id()))
 	return true
 

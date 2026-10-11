@@ -7,17 +7,18 @@ Open `1v1supers/project.godot` and press Play — the main scene is `prototype.t
 
 | Action | Key |
 |---|---|
-| Move / run | WASD / Shift |
+| Move / run (super speed with the speed boots) | WASD / Shift |
 | Jump (and fly up) | Space |
-| Dash (you can't be hit for the first 0.18 s: dodge through a swing) | Ctrl |
+| Dash (you can't be hit for the first 0.18 s: dodge through a swing; long dash with the speed boots) | Ctrl |
 | Punch combo (hook, jab, cross, spin kick) | Left mouse |
 | Block (hold). Raise it just before a hit to **parry** | V or mouse thumb button |
 | Aim (tighter target lock) | Right mouse |
-| Interact: pick up item, grab/drop a knocked-out body, use a held usable item | F or E |
+| Laser eyes (laser visor on): hold aim, then hold punch | Right mouse + left mouse |
+| Interact: pick up item (gear goes straight on), grab/drop a knocked-out body, use a held usable item | F or E |
 | Throw: hold to charge, release to throw (tap to drop) | G or Q |
-| Power: fly while wearing the cape (jump first) | R |
+| Fly (cape on): take off / drop out of flight. Jumping again mid-air also takes off | R |
 | Fly down | C |
-| Inventory (drag the item in your hand onto a ring to wear it) | Tab |
+| Inventory (drag items between your hand and the worn slots) | Tab |
 | Show hitboxes | \` |
 | Multiplayer menu (host / join / invite) | F1 |
 | Free the mouse | Esc |
@@ -72,6 +73,22 @@ How it works:
   on each PC separately, so they can differ a little. Also: 2 players, no
   reconnect, no cheat protection (play with friends).
 
+## Superpowers come from items
+
+Every power is worn: put the item on and you have it, take it off and it is
+gone. Walk up to a piece of gear in the level and press F: it goes straight on
+(into the hand instead if that slot is already taken). The HUD lists the powers
+you have and their keys, bottom left.
+
+| Item | Slot | Power |
+|---|---|---|
+| Cape | cape | **Flight** — R takes off (from the ground too), or jump twice. Space up, C down, Shift for a fast superman flight |
+| Speed boots | boots | **Super speed** — Shift sprints at 17 m/s instead of 5, leaving an afterimage trail; the dodge becomes a long dash |
+| Laser visor | helmet | **Laser eyes** — hold right mouse to aim, then left mouse: a heat beam from the eyes to the crosshair, 30 damage a second while it burns 20 stamina a second; walls stop it |
+
+Powers stack (cape + boots + visor at once). They work online too: the other
+player sees your gear, your beam and your trail.
+
 ## Fighting
 
 - **Block** (hold V): hits from the front only chip 15% of their damage and push
@@ -94,7 +111,7 @@ Player (CharacterBody3D)            Scripts/Characters/Player.gd — locomotion 
 │                                   LocalPlayerInput = keyboard/mouse, ScriptedPlayerInput = AI/tests/network
 ├─ state        PlayerState         WHAT it is doing — exactly one at a time:
 │                                   Free, Attack, Dash, Turn, Gesture, ThrowCharge, UseItem, Fly,
-│                                   Block, Stagger, Dead
+│                                   Laser, Block, Stagger, Dead
 ├─ Animator     PlayerAnimator      the only thing that touches the AnimationTree
 ├─ MeleeCombat                      combo data, hitboxes, target finding
 ├─ Guard                            block / parry / guard break: edits incoming hits
@@ -102,6 +119,8 @@ Player (CharacterBody3D)            Scripts/Characters/Player.gd — locomotion 
 ├─ Stamina, Footsteps
 ├─ Health, Hurtbox3D                hit points / where you can be hit
 ├─ RagdollController, RagdollGrabber
+├─ Powers                           one Power per worn item that has a power_id:
+│                                   FlightPower, SuperSpeedPower, LaserEyesPower (Scripts/Characters/Powers)
 └─ Inventory (hand), Equipment (worn items)
    NetSync                          online only: sends this fighter / replays the other one
 
@@ -116,6 +135,11 @@ NetMenu          the F1 panel
   `allows_sprint`, `update_facing`, …), register it in `Player._ready`.
   States decide which actions may interrupt them; a target state refuses entry
   through `can_enter`.
+- **Adding a power**: give the item an `ItemData.power_id`, write a `Power`
+  subclass (hooks: `handle_intent`, `physics_update`, `run_speed`,
+  `dash_scale`, `hint`; a state of its own if it needs one) and add a line to
+  `Powers.REGISTRY`. Worn gear without art yet subclasses `GearWearable`, which
+  builds it from boxes placed in character space (+Y up, +Z forward).
 - **Hits** travel as a `HitInfo` (damage, knockback, hitstop, attacker, kind).
   `Health` only keeps score; the body that was hit applies knockback
   (`HitReaction`), and `RagdollController` alone starts the death ragdoll.
@@ -129,7 +153,8 @@ NetMenu          the F1 panel
 Headless gameplay tests drive the player through `ScriptedPlayerInput` and check
 speeds, jump heights, dash distance, combo damage/timing, throws, flight,
 death/respawn, grabbing, two-player independence, block/parry/guard break/dodge
-(`test_defense`) and the inventory UI. Numbers marked *golden* were measured on
+(`test_defense`), the item powers (`test_powers`: gear worn on pickup, super
+speed, laser damage/stamina/walls, flight take-off) and the inventory UI. Numbers marked *golden* were measured on
 the game before the refactor.
 
 The network tests start a second Godot process and play a real session over

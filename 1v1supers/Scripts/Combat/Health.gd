@@ -60,7 +60,8 @@ func apply_damage(hit: HitInfo, hp_after: float = -1.0) -> bool:
 	if hp_after < 0.0 and guard.is_valid():
 		guard.call(hit) # a replayed hit (hp_after given) was already guarded on its owner's machine
 	current = maxf(current - hit.damage, 0.0) if hp_after < 0.0 else clampf(hp_after, 0.0, max_health)
-	_invuln_timer = invuln_time
+	if hit.kind != HitInfo.Kind.ENERGY: # a beam's ticks are spaced by the beam itself
+		_invuln_timer = invuln_time
 	last_hit = hit
 	health_changed.emit(current, max_health)
 	damaged.emit(hit)

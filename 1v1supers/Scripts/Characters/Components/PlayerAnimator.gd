@@ -51,6 +51,7 @@ func setup(p_tree: AnimationTree, p_player: AnimationPlayer) -> bool:
 	_upper_shot = _root.get_node("UpperOneShot") as AnimationNodeOneShot
 	_upper_shot.filter_enabled = true
 	_build_fly_nodes()
+	_build_run_scale()
 	tree.active = true
 	reset()
 	return true
@@ -102,6 +103,27 @@ func _build_fly_nodes() -> void:
 	_root.connect_node("FlyOneShot", 1, "FlyBlend")
 	_root.connect_node("output", 0, "FlyOneShot")
 
+## A TimeScale between the run clip and its blend, so super speed can play the
+## run faster instead of sliding.
+func _build_run_scale() -> void:
+	if _root.has_node("RunScale") or not _root.has_node("Run"):
+		return
+	var conns: Array = _root.get("node_connections") # [to, port, from, to, port, from, ...]
+	for k in range(0, conns.size(), 3):
+		if StringName(conns[k + 2]) == &"Run":
+			var to := StringName(conns[k])
+			var port: int = conns[k + 1]
+			_root.add_node("RunScale", AnimationNodeTimeScale.new(), Vector2(500, 300))
+			_root.disconnect_node(to, port)
+			_root.connect_node("RunScale", 0, "Run")
+			_root.connect_node(to, port, "RunScale")
+			return
+
+## Playback speed of the run clip (1 = authored speed).
+func set_run_speed_scale(scale: float) -> void:
+	if is_ready() and _root.has_node("RunScale"):
+		tree.set("parameters/RunScale/scale", scale)
+
 func is_ready() -> bool:
 	return _root != null
 
@@ -116,6 +138,7 @@ func reset() -> void:
 	tree.set("parameters/UpperScale/scale", 1.0)
 	tree.set("parameters/HoldScale/scale", 1.0)
 	tree.set("parameters/WalkScale/scale", walk_anim_speed)
+	set_run_speed_scale(1.0)
 	tree.set("parameters/WalkSpace/blend_mode", 0) # interpolated: smooth left<->right strafe
 	tree.set("parameters/ground_air_transition/transition_request", "grounded")
 	tree.set("parameters/iwr_blend/blend_amount", -1.0)

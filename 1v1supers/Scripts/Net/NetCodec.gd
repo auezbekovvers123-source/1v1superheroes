@@ -26,6 +26,7 @@ const HELD_AIM := 4
 const HELD_THROW := 8
 const HELD_FLY_DOWN := 16
 const HELD_BLOCK := 32
+const HELD_ATTACK := 64
 
 enum Press { JUMP, ATTACK, DASH, INTERACT, THROW, POWER }
 const PRESS_COUNT := 6
@@ -38,6 +39,7 @@ static func held_bits(i: PlayerInput.Intent) -> int:
 	if i.throw_held: b |= HELD_THROW
 	if i.fly_down_held: b |= HELD_FLY_DOWN
 	if i.block_held: b |= HELD_BLOCK
+	if i.attack_held: b |= HELD_ATTACK
 	return b
 
 ## The presses of this intent, in Press order.

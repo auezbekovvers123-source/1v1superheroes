@@ -2,10 +2,10 @@ extends PlayerInput
 class_name ScriptedPlayerInput
 ## Input driven from code: tests, AI opponents, network replay.
 ##   set_move(Vector2(0, -1))   # walk forward
-##   hold(&"run", true)         # held buttons: run, jump, aim, throw, fly_down, block
+##   hold(&"run", true)         # held buttons: run, jump, aim, throw, fly_down, block, attack
 ##   tap(&"attack")             # one-frame presses: attack, dash, interact, power, jump, throw, debug_hitbox
 
-const HELD := [&"run", &"jump", &"aim", &"throw", &"fly_down", &"block"]
+const HELD := [&"run", &"jump", &"aim", &"throw", &"fly_down", &"block", &"attack"]
 
 var _move := Vector2.ZERO
 var _held := {}
@@ -43,6 +43,7 @@ func _read(i: Intent) -> void:
 	i.throw_held = _is_down(&"throw")
 	i.throw_pressed = i.throw_held and not _was_held.get(&"throw", false)
 	i.attack_pressed = _taps.get(&"attack", false)
+	i.attack_held = _is_down(&"attack")
 	i.dash_pressed = _taps.get(&"dash", false)
 	i.interact_pressed = _taps.get(&"interact", false)
 	i.power_pressed = _taps.get(&"power", false)

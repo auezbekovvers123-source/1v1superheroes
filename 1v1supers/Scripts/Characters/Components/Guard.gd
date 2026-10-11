@@ -53,7 +53,7 @@ func in_parry_window() -> bool:
 func filter(hit: HitInfo) -> void:
 	if not _raised or not _covers(hit):
 		return
-	if in_parry_window():
+	if in_parry_window() and hit.kind != HitInfo.Kind.ENERGY: # a beam can be blocked, not parried
 		hit.parried = true
 		hit.damage = 0.0
 		hit.knockback = Vector3.ZERO

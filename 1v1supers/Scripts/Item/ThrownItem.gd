@@ -105,7 +105,7 @@ func _check_impact() -> void:
 func try_interact(picker: Player, ignore_delay: bool = false) -> bool:
 	if _picked or (_life_time < PICKUP_DELAY and not ignore_delay) or item_data == null:
 		return false
-	if not picker.hand.pick_up(item_data):
+	if not picker.take_from_world(item_data):
 		return false
 	take_away()
 	return true

@@ -12,11 +12,14 @@ static func parent_for(n: Node) -> Node:
 
 ## Burst of particles + impact sound at a body that took a hit.
 static func on_damaged(body: Node3D, hit: HitInfo) -> void:
+	if hit.guard_broken:
+		popup_text(body, "GUARD BREAK", Color(1.0, 0.45, 0.2))
+	if hit.kind == HitInfo.Kind.ENERGY:
+		_scorch(body) # beams tick several times a second, guarded or not: small sizzle, no sound
+		return
 	if hit.parried or hit.blocked:
 		_guard_burst(body, hit)
 		return
-	if hit.guard_broken:
-		popup_text(body, "GUARD BREAK", Color(1.0, 0.45, 0.2))
 	var crit := hit.is_critical()
 	var particles := _burst(Color(1.0, 0.85, 0.2) if crit else Color(1.0, 0.45, 0.15), 12 if not crit else 28, 0.35,
 		Vector3(0, 1, 0), 45.0, 4.0, 9.0 if not crit else 14.0, Vector3(0, -18.0, 0), 0.08, 0.18, 0.12)
@@ -25,6 +28,13 @@ static func on_damaged(body: Node3D, hit: HitInfo) -> void:
 	particles.emitting = true
 	_free_later(particles, 1.0)
 	_play_hit_sound(body, hit)
+
+static func _scorch(body: Node3D) -> void:
+	var p := _burst(Color(1.0, 0.45, 0.1), 5, 0.25, Vector3(0, 1, 0), 40.0, 1.0, 3.0, Vector3(0, 2.0, 0), 0.04, 0.08, 0.08)
+	parent_for(body).add_child(p)
+	p.global_position = body.global_position + Vector3(0, 1.1, 0)
+	p.emitting = true
+	_free_later(p, 0.6)
 
 ## A hit caught on the guard: cool sparks, a higher clink, a word over the head.
 static func _guard_burst(body: Node3D, hit: HitInfo) -> void:

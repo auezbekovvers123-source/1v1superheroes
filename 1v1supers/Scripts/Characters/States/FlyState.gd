@@ -1,18 +1,31 @@
 extends PlayerState
 class_name FlyState
-## Cape power: free flight. Started mid-air with the power button while wearing
-## the cape; ends on touchdown, on the power button, or when the cape comes off.
+## Cape power: free flight (FlightPower starts it). From the ground it takes off
+## with an upward burst; ends on touchdown, on the power button, or when the
+## cape comes off.
 ## Camera-relative movement, jump = up, fly_down = down, run = sprint-flight
 ## (superman pose with a strong forward pitch).
 
+const TAKEOFF_SPEED := 7.0
+const TAKEOFF_TIME := 0.35 # no touchdown and no floor snap while lifting off
+
 var _tilt_x: float = 0.0
 var _roll_z: float = 0.0
+var _takeoff: float = 0.0
 
-func can_enter(_args: Dictionary) -> bool:
-	return not player.is_on_floor() and player.has_power("fly")
+func can_enter(args: Dictionary) -> bool:
+	return (not player.is_on_floor() or args.get("takeoff", false)) and player.has_power("fly")
 
-func enter(_args: Dictionary) -> void:
-	player.velocity.y = minf(player.velocity.y, 1.0)
+func enter(args: Dictionary) -> void:
+	_takeoff = 0.0
+	if args.get("takeoff", false):
+		_takeoff = TAKEOFF_TIME
+		player.velocity.y = TAKEOFF_SPEED
+		player.note_airborne(TAKEOFF_SPEED)
+		player.squash_mesh(Vector3(0.85, 1.2, 0.85), 0.0, 0.18)
+		player.camera_shake(0.15)
+	else:
+		player.velocity.y = minf(player.velocity.y, 1.0)
 	player.stop_mesh_tilt_tween()
 	_tilt_x = player.mesh.rotation.x
 	_roll_z = player.mesh.rotation.z
@@ -40,15 +53,19 @@ func move(delta: float) -> void:
 	var v_speed: float = player.fly_vertical_speed * (player.fly_vertical_sprint_mult if sprinting else 1.0)
 	var target := horiz * h_speed
 	target.y = (v_speed if up else 0.0) - (v_speed if down else 0.0)
+	if _takeoff > 0.0:
+		_takeoff -= delta
+		target.y = maxf(target.y, TAKEOFF_SPEED) # keep rising until clear of the ground
 	var v := player.velocity
 	v.x = player.smooth(v.x, target.x, player.fly_accel, delta)
 	v.z = player.smooth(v.z, target.z, player.fly_accel, delta)
 	v.y = player.smooth(v.y, target.y, player.fly_accel * 1.2, delta)
 	player.velocity = v
-	player.apply_floor_snap()
+	if _takeoff <= 0.0:
+		player.apply_floor_snap()
 	player.move_and_slide()
 	player.stamina.tick(delta)
-	if player.is_on_floor():
+	if player.is_on_floor() and _takeoff <= 0.0:
 		player.footsteps.sync_floor(true)
 		player.note_landed_from_flight()
 		player.change_state(&"free") # touchdown ends flight

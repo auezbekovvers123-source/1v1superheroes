@@ -22,5 +22,6 @@ func _read(i: Intent) -> void:
 	i.debug_hitbox_pressed = Input.is_action_just_pressed("toggle_hitbox_debug")
 	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		i.attack_pressed = Input.is_action_just_pressed("punch")
+		i.attack_held = Input.is_action_pressed("punch")
 		i.aim_held = Input.is_action_pressed("aim")
 		i.dash_pressed = Input.is_action_just_pressed("dash")

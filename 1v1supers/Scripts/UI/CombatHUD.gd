@@ -1,6 +1,7 @@
 extends CanvasLayer
 class_name CombatHUD
-## Minimal HUD for the local player: HP, stamina, combo counter, aim reticle.
+## Minimal HUD for the local player: HP, stamina, combo counter, aim reticle
+## and the keys for the superpowers their worn items give.
 
 var player: Player = null
 
@@ -10,6 +11,7 @@ var _stamina_bar: ProgressBar
 var _stamina_label: Label
 var _combo_label: Label
 var _cross: Label
+var _powers_label: Label
 
 func _ready() -> void:
 	var root := Control.new()
@@ -34,6 +36,15 @@ func _ready() -> void:
 	_stamina_label = _make_label(root, Vector2(22, 40), 10, Color.WHITE)
 	_combo_label = _make_label(root, Vector2(18, 60), 22, Color(1, 0.92, 0.28))
 
+	# Powers: bottom-left, one line per worn power
+	_powers_label = _make_label(root, Vector2.ZERO, 14, Color(1, 0.9, 0.55))
+	_powers_label.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT)
+	_powers_label.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_powers_label.offset_left = 18
+	_powers_label.offset_bottom = -18
+	_powers_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	_powers_label.add_theme_constant_override("outline_size", 4)
+
 	# Full-width strip with centred text: stays centred at any window size (a
 	# centre anchor set before the HUD has a size put it in a corner)
 	var title := _make_label(root, Vector2.ZERO, 22, Color.WHITE)
@@ -48,6 +59,8 @@ func _ready() -> void:
 	if player:
 		player.health.health_changed.connect(_on_hp)
 		_on_hp(player.health.current, player.health.max_health)
+		player.powers.changed.connect(_on_powers)
+		_on_powers()
 
 func _make_bar(parent: Control, pos: Vector2, size: Vector2, fill: Color) -> ProgressBar:
 	var bar := ProgressBar.new()
@@ -108,3 +121,8 @@ func _process(_delta: float) -> void:
 		if _combo_label.visible:
 			_combo_label.text = "COMBO %d/%d (%.1fs)" % [combat.combo_index + 1, total, combat.combo_reset_timer]
 			_combo_label.modulate = Color(1, 1, 1, 0.82)
+
+func _on_powers() -> void:
+	var hints := player.powers.hints()
+	_powers_label.text = "\n".join(hints)
+	_powers_label.visible = not hints.is_empty()

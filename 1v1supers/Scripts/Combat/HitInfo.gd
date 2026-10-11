@@ -3,7 +3,7 @@ class_name HitInfo
 ## Everything about one hit, passed from the attacker to Health and the target.
 ## Replaces reading the attacker's internals (e.g. its current animation name).
 
-enum Kind { PUNCH, KICK, THROWN, OTHER }
+enum Kind { PUNCH, KICK, THROWN, OTHER, ENERGY }
 
 const CRITICAL_DAMAGE: float = 18.0
 

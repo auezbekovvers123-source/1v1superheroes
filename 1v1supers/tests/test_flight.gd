@@ -1,5 +1,6 @@
 extends "res://tests/test_case.gd"
-## Cape power: flight speeds, landing, losing the cape mid-air.
+## Cape power: take-off (power key or double jump), flight speeds, landing,
+## losing the cape mid-air.
 
 func run() -> void:
 	await load_level()
@@ -9,9 +10,30 @@ func run() -> void:
 	player.equip_from_hand(ItemData.EquipSlot.CAPE)
 
 	section("take off")
+	var ground_y := player.global_position.y
+	pin.tap(&"power")
+	await seconds(0.5)
+	check(player.is_flying(), "power on the ground takes off")
+	check(player.global_position.y - ground_y > 1.5, "and lifts clear of the ground (%.2f m)" % (player.global_position.y - ground_y))
 	pin.tap(&"power")
 	await frames(2)
-	check(player.state.name != &"fly", "no flight from the ground")
+	check(not player.is_flying(), "power again drops out of flight")
+	await _until_landed()
+	pin.tap(&"jump")
+	await frames(3)
+	pin.tap(&"jump") # too soon: the key bounced
+	await frames(2)
+	check(not player.is_flying(), "no flight from a jump bounced on the key")
+	await _until_landed()
+	pin.hold(&"jump", true)
+	await frames(12)
+	pin.hold(&"jump", false)
+	await frames(4)
+	pin.tap(&"jump")
+	await frames(1)
+	check(player.is_flying(), "jumping again mid-air starts flight")
+	pin.tap(&"power")
+	await _until_landed()
 	pin.hold(&"jump", true)
 	await frames(10)
 	pin.hold(&"jump", false)
@@ -61,3 +83,10 @@ func run() -> void:
 	player.unequip_to_hand(ItemData.EquipSlot.CAPE)
 	await frames(2)
 	check(not player.is_flying(), "losing the cape ends flight")
+
+func _until_landed() -> void:
+	for i in 300:
+		await physics_frame
+		if player.is_on_floor() and not player.is_flying():
+			break
+	await frames(20)

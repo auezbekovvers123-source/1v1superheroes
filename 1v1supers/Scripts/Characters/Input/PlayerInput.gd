@@ -18,6 +18,7 @@ class Intent:
 	var jump_pressed := false
 	var jump_released := false
 	var attack_pressed := false
+	var attack_held := false
 	var aim_held := false
 	var dash_pressed := false
 	var interact_pressed := false
@@ -40,6 +41,7 @@ class Intent:
 		jump_pressed = false
 		jump_released = false
 		attack_pressed = false
+		attack_held = false
 		aim_held = false
 		dash_pressed = false
 		interact_pressed = false

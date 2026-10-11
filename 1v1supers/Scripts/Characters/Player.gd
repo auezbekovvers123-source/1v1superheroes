@@ -12,7 +12,7 @@ class_name Player
 ##  - Locomotion (this file): walking, running, gravity, jumping, facing.
 ##  - Components (children): Stamina, Footsteps, MeleeCombat, HandHold,
 ##    PlayerAnimator, Guard, Health, Hurtbox3D, RagdollController,
-##    RagdollGrabber, Inventory, Equipment.
+##    RagdollGrabber, Inventory, Equipment, Powers (superpowers from worn items).
 
 signal state_changed(from: StringName, to: StringName)
 signal respawned()
@@ -85,6 +85,10 @@ signal picked_from_world(item: Node3D)
 const YAW_OFFSET: float = PI
 const TURN_ROOT_BONE: String = "root.x"
 const TURN_ROOT_TRACK: String = "root/Skeleton3D:root.x"
+# Laser visor: the eyes relative to the head bone (character space, metres)
+const EYE_HEIGHT := 0.2
+const EYE_FORWARD := 0.255 # the front of the visor's lens
+const EYE_SPREAD := 0.14
 
 @onready var mesh: Node3D = $Mesh
 @onready var camera_rig: SpringArmPivot = $SpringArmPivot
@@ -97,6 +101,7 @@ var footsteps: Footsteps
 var combat: MeleeCombat
 var hand: HandHold
 var guard: Guard
+var powers: Powers
 var health: Health
 var hurtbox: Hurtbox3D
 var ragdoll: RagdollController
@@ -116,6 +121,8 @@ var stun_timer: float = 0.0
 var dash_recovery_timer: float = 0.0
 var dash_direction := Vector3.ZERO
 var turn_cooldown_timer: float = 0.0
+## Seconds since the feet last touched the ground (0 while grounded).
+var air_time: float = 0.0
 
 var _locomotion_speed: float = 0.0
 var _coyote_timer: float = 0.0
@@ -153,6 +160,7 @@ func _ready() -> void:
 		&"dead": DeadState.new(self, &"dead"),
 		&"block": BlockState.new(self, &"block"),
 		&"stagger": StaggerState.new(self, &"stagger"),
+		&"laser": LaserState.new(self, &"laser"),
 	}
 	state = _states[&"free"]
 	intent = input.current()
@@ -194,6 +202,8 @@ func _setup_components() -> void:
 	guard = _child("Guard", func(): return Guard.new())
 	guard.setup(self)
 	health.guard = guard.filter
+	powers = _child("Powers", func(): return Powers.new())
+	powers.setup(self)
 	ragdoll.about_to_start.connect(reset_mesh_scale)
 	health.damaged.connect(_on_damaged)
 	health.died.connect(_on_died)
@@ -268,8 +278,8 @@ func _physics_process(delta: float) -> void:
 	if intent.debug_hitbox_pressed:
 		combat.toggle_debug()
 	animator.set_hold(&"carry", grabber.is_grabbing())
-	if intent.power_pressed:
-		_toggle_power()
+	air_time = 0.0 if is_on_floor() else air_time + delta
+	powers.handle_intent(intent) # worn items' powers get first look (fly, laser...)
 	state.handle_intent(intent)
 	_update_aim()
 	# Timers tick after this frame's actions started (a dash's recovery counts from its first frame)
@@ -282,6 +292,7 @@ func _physics_process(delta: float) -> void:
 	else:
 		_locomotion(delta)
 	combat.update_hitbox_transforms(mesh, is_attacking())
+	powers.physics_update(delta)
 
 func _tick_timers(delta: float) -> void:
 	stun_timer = maxf(stun_timer - delta, 0.0)
@@ -308,7 +319,8 @@ func _locomotion(delta: float) -> void:
 	if is_sprinting and not is_attacking() and on_floor and move_direction.length() > 0.1:
 		stamina.use(stamina.run_drain_per_sec * delta)
 	stamina.tick(delta)
-	var speed: float = run_speed if is_sprinting else walk_speed
+	var sprint_speed := current_run_speed()
+	var speed: float = sprint_speed if is_sprinting else walk_speed
 	if carrying:
 		# Carrying a body locks to the 8-way walk (the run clip has no strafes);
 		# holding run just hurries the walk instead of slowing it.
@@ -334,7 +346,7 @@ func _locomotion(delta: float) -> void:
 	if not state.set_horizontal_velocity(delta, target):
 		if dash_recovery_timer > 0.0:
 			var t: float = clampf(1.0 - dash_recovery_timer / maxf(dash_recovery, 0.001), 0.0, 1.0)
-			var rec_speed: float = dash_speed * lerpf(dash_recovery_speed_start, dash_recovery_speed_end, t)
+			var rec_speed: float = current_dash_speed() * lerpf(dash_recovery_speed_start, dash_recovery_speed_end, t)
 			velocity.x = dash_direction.x * rec_speed + target.x * dash_recovery_steer
 			velocity.z = dash_direction.z * rec_speed + target.y * dash_recovery_steer
 		else:
@@ -387,8 +399,18 @@ func _locomotion(delta: float) -> void:
 		gait = Footsteps.Gait.RUN
 	footsteps.update_steps(delta, is_on_floor(), horiz_speed, gait, state.suppresses_footsteps())
 	camera_rig.run_fov_active = is_on_floor() and intent.run and horiz_speed > 0.6 and not is_attacking() and not carrying
-	var running := is_equal_approx(_locomotion_speed, run_speed) and intent.run and not carrying
+	var running := is_equal_approx(_locomotion_speed, sprint_speed) and intent.run and not carrying
+	# Super speed plays the run clip faster instead of letting the feet skate
+	animator.set_run_speed_scale(clampf(horiz_speed / run_speed, 1.0, 2.6) if running else 1.0)
 	animator.update_locomotion(delta, is_on_floor(), velocity.length() > 0.1, running, intent.move)
+
+## Sprint speed right now (a worn power can raise it).
+func current_run_speed() -> float:
+	var s := powers.run_speed()
+	return s if s > 0.0 else run_speed
+
+func current_dash_speed() -> float:
+	return dash_speed * powers.dash_scale()
 
 ## Called by FlyState when flight ends on touchdown (no landing squash/anim).
 func note_landed_from_flight() -> void:
@@ -586,12 +608,7 @@ func throw_release_anim() -> String:
 func play_throw_release() -> void:
 	animator.play_action(throw_release_anim(), hand.throw_release_anim_speed, 0.08, 0.16, mask_for_movement(0.18))
 
-func _toggle_power() -> void:
-	if is_flying():
-		change_state(&"free")
-	elif not is_dead() and has_power("fly"):
-		try_change_state(&"fly") # only mid-air: jump first
-
+## True while a worn item grants the power ("fly", "speed", "laser"...).
 func has_power(power_id: String) -> bool:
 	return equipment.has_power(power_id)
 
@@ -656,6 +673,15 @@ func bake_turn_into_mesh() -> void:
 # --- Damage / death ---------------------------------------------------------------
 
 func _on_damaged(hit: HitInfo) -> void:
+	if hit.kind == HitInfo.Kind.ENERGY:
+		# A beam burns in many small ticks (a raised guard soaks them): a light reaction each time
+		if not hit.blocked:
+			stun_timer = maxf(stun_timer, 0.05)
+		camera_shake(0.05)
+		HitReaction.knock(self, hit)
+		if hit.guard_broken:
+			stagger(guard.break_stagger)
+		return
 	if hit.parried:
 		_guard_flash(Color(0.35, 0.85, 1.0, 0.7))
 		camera_shake(0.25)
@@ -732,6 +758,29 @@ func is_holding_item() -> bool:
 
 func is_carrying_body() -> bool:
 	return grabber.is_grabbing()
+
+## Picking something up off the ground: a wearable goes straight on when its
+## slot is free (put on the cape = fly), anything else goes to the hand.
+func take_from_world(data: ItemData) -> bool:
+	if data and data.scene and data.slot != ItemData.EquipSlot.NONE and data.slot != ItemData.EquipSlot.HAND \
+			and not equipment.has_equipped(data.slot) and equipment.equip(data) != null:
+		return true
+	return hand.pick_up(data)
+
+## Eye positions in world space (left, right): the laser visor fires from here.
+func eye_points() -> Array[Vector3]:
+	var head := head_frame()
+	return [head * Vector3(EYE_SPREAD, EYE_HEIGHT, EYE_FORWARD), head * Vector3(-EYE_SPREAD, EYE_HEIGHT, EYE_FORWARD)]
+
+## The head bone in world space with the character's axes (+Y up, +Z forward):
+## turns and tilts with the head. Worn gear is placed the same way.
+func head_frame() -> Transform3D:
+	var skel := get_skeleton()
+	var idx := skel.find_bone("head.x") if skel else -1
+	if idx < 0:
+		return Transform3D(mesh.global_basis.orthonormalized(), global_position + Vector3(0, 1.74, 0))
+	var undo_rest := Transform3D(skel.get_bone_global_rest(idx).basis.orthonormalized().inverse(), Vector3.ZERO)
+	return skel.global_transform * skel.get_bone_global_pose(idx) * undo_rest
 
 func pick_up_item(data: ItemData) -> bool:
 	return hand.pick_up(data)

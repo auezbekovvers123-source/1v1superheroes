@@ -8,6 +8,8 @@ extends "res://tests/test_case.gd"
 
 const ROCK := "res://Assets/Item/Usable Assets/rock_item.tres"
 const CLOAK := "res://Assets/Item/Cloak Assets/cloak_item.tres"
+const VISOR := "res://Assets/Item/Hero Gear/laser_visor_item.tres"
+const BOOTS := "res://Assets/Item/Hero Gear/speed_boots_item.tres"
 
 var net: Node
 var client_pid := -1
@@ -169,6 +171,30 @@ func _run_session() -> void:
 	r = await _report()
 	check(r.fly, "the client wears the cape")
 	check(copy.equipment.has_power("fly") and copy.held_item == null, "the copy wears it too")
+
+	section("item powers")
+	for gear in [[BOOTS, ItemData.EquipSlot.BOOTS], [VISOR, ItemData.EquipSlot.HELMET]]:
+		_cmd("give", [gear[0]])
+		await seconds(0.3)
+		_cmd("equip", [gear[1]])
+		await seconds(0.3)
+	await seconds(0.3)
+	check(copy.powers.has("speed") and copy.powers.has("laser") and copy.powers.has("fly"), "the copy wears the boots and visor too: same powers")
+	await _face_off()
+	var hp_before_beam := player.health.current
+	_cmd("hold", ["aim", true])
+	await seconds(0.4)
+	_cmd("hold", ["attack", true])
+	await seconds(1.0)
+	check(copy.state.name == &"laser" and copy.get_node_or_null("LaserBeam") != null, "we see the client's laser beam")
+	_cmd("hold", ["attack", false])
+	_cmd("hold", ["aim", false])
+	await seconds(0.8)
+	var burned := hp_before_beam - player.health.current
+	# 30 a second on the client's machine; each tick reaches us once
+	check(burned >= 24.0 and burned <= 36.0, "the client's beam burned us: %.0f HP in about 1 s" % burned)
+	r = await _report()
+	near(r.host_hp, player.health.current, 0.01, "and the client sees the same HP")
 
 	section("leaving")
 	_cmd("quit")

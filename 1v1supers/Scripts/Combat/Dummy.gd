@@ -160,6 +160,12 @@ func _physics_process(delta: float) -> void:
 		velocity.z = 0.0
 
 func _on_damaged(hit: HitInfo) -> void:
+	if hit.kind == HitInfo.Kind.ENERGY:
+		# A beam burns in many small ticks: a light push each time, no flinch or flash
+		_stun_timer = maxf(_stun_timer, 0.05)
+		if not (ragdoll.is_ragdolled() or _respawn_lock > 0.0 or _anchor_timer > 0.0):
+			HitReaction.knock(self, hit)
+		return
 	var crit := hit.is_critical()
 	_stun_timer = 0.36 if crit else 0.18
 	if crit:

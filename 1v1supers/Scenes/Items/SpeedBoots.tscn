@@ -1,0 +1,9 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://Scripts/Item/SpeedBootsWearable.gd" id="1_boots"]
+
+[node name="SpeedBoots" type="BoneAttachment3D"]
+bone_name = "foot.l"
+script = ExtResource("1_boots")
+item_name = "Speed Boots"
+item_id = "speed_boots"

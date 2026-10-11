@@ -61,8 +61,9 @@ func physics_update(_delta: float) -> void:
 
 func set_horizontal_velocity(delta: float, _target: Vector2) -> bool:
 	# Ease into the burst instead of snapping velocity in one frame
-	player.velocity.x = player.smooth(player.velocity.x, _dir.x * player.dash_speed, player.dash_enter_rate, delta)
-	player.velocity.z = player.smooth(player.velocity.z, _dir.z * player.dash_speed, player.dash_enter_rate, delta)
+	var burst := player.current_dash_speed()
+	player.velocity.x = player.smooth(player.velocity.x, _dir.x * burst, player.dash_enter_rate, delta)
+	player.velocity.z = player.smooth(player.velocity.z, _dir.z * burst, player.dash_enter_rate, delta)
 	_timer -= delta
 	return true
 
