@@ -143,27 +143,6 @@ func set_wind(strength: float, speed: float) -> void:
 		_mat.set_shader_parameter("strength", strength)
 		_mat.set_shader_parameter("speed", speed)
 
-# --- Power: cape grants "fly" (activated with R while airborne) ---
-func get_power_id() -> String:
-	return "fly"
-
-func can_activate_power(player: Node) -> bool:
-	if player == null:
-		return false
-	if player.has_method("can_fly"):
-		return player.call("can_fly")
-	return true
-
-func activate_power(player: Node) -> bool:
-	if player and player.has_method("try_toggle_fly"):
-		player.call("try_toggle_fly")
-		return true
-	return false
-
-func deactivate_power(player: Node) -> void:
-	if player and player.has_method("set_flying") and player.get("is_flying"):
-		player.call("set_flying", false)
-
 func equip(to_skeleton: Skeleton3D, target_bone: String = "") -> bool:
 	var ok: bool = super.equip(to_skeleton, target_bone)
 	if ok:
@@ -241,7 +220,6 @@ func _setup_cape_skeleton() -> void:
 		skel.set_bone_pose_rotation(i, Quaternion.IDENTITY)
 		skel.set_bone_pose_scale(i, Vector3.ONE)
 	_cape_skeleton_ready = true
-	print("[Cape] Skeleton ready: %d bones, len %.2f" % [count, blen])
 
 func _generate_cape_skin(skel: Skeleton3D, mi: MeshInstance3D, bone_count: int, bone_len: float) -> void:
 	var orig_mesh = mi.mesh
@@ -312,7 +290,6 @@ func _generate_cape_skin(skel: Skeleton3D, mi: MeshInstance3D, bone_count: int, 
 	mi.mesh = new_mesh
 	mi.skin = skin
 	mi.skeleton = NodePath(skel.get_path())
-	print("[Cape] Skin generated with %d bones" % bone_count)
 
 func _update_cape_physics(delta: float) -> void:
 	if not _cape_skeleton_ready or _cape_skeleton == null or cape_bone_count == 0:
