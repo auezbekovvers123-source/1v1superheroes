@@ -92,6 +92,7 @@ func _hit(target: Node3D, health: Health) -> void:
 	dir = dir.normalized()
 	var hit := HitInfo.make(_template.damage, owner_body, dir * _knockback_strength + Vector3(0, 0.35, 0),
 		_template.kind, _template.hitstop, _template.shake)
+	hit.label = _template.label
 	if not health.take_damage(hit):
 		return
 	hit_landed.emit(target, hit)

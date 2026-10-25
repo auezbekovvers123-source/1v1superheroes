@@ -36,6 +36,11 @@ func run_speed() -> float:
 func dash_scale() -> float:
 	return 1.0
 
+## A punch or kick is about to start hitting: raise its damage, hitstop, shake
+## or label, and return a multiplier on its knockback (1 = unchanged).
+func boost_strike(_hit: HitInfo) -> float:
+	return 1.0
+
 ## One line for the HUD: what it is and how to use it.
 func hint() -> String:
 	return ""

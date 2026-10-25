@@ -14,6 +14,8 @@ static func parent_for(n: Node) -> Node:
 static func on_damaged(body: Node3D, hit: HitInfo) -> void:
 	if hit.guard_broken:
 		popup_text(body, "GUARD BREAK", Color(1.0, 0.45, 0.2))
+	elif hit.label != "" and not hit.blocked and not hit.parried:
+		popup_text(body, hit.label, Color(1.0, 0.72, 0.15))
 	if hit.kind == HitInfo.Kind.ENERGY:
 		_scorch(body) # beams tick several times a second, guarded or not: small sizzle, no sound
 		return
@@ -72,6 +74,44 @@ static func popup_text(body: Node3D, text: String, color: Color) -> void:
 	tw.tween_property(label, "global_position:y", label.global_position.y + 0.6, 0.7).set_ease(Tween.EASE_OUT)
 	tw.tween_property(label, "modulate:a", 0.0, 0.7).set_delay(0.25)
 	_free_later(label, 0.75)
+
+## Ground slam: a ring of dust racing out to `radius`, debris and a heavy thud.
+static func shockwave(from: Node3D, at: Vector3, radius: float) -> void:
+	var parent := parent_for(from)
+	var ring := MeshInstance3D.new()
+	var torus := TorusMesh.new()
+	torus.inner_radius = 0.85
+	torus.outer_radius = 1.0
+	torus.rings = 32
+	ring.mesh = torus
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = Color(1.0, 0.85, 0.6, 0.8)
+	ring.material_override = mat
+	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(ring)
+	ring.global_position = at + Vector3(0, 0.08, 0)
+	ring.scale = Vector3(0.3, 0.25, 0.3)
+	var tw := ring.create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_property(ring, "scale", Vector3(radius, 0.12, radius), 0.35)
+	tw.tween_property(mat, "albedo_color:a", 0.0, 0.4)
+	_free_later(ring, 0.45)
+	var dust := _burst(Color(0.75, 0.68, 0.58), 40, 0.6, Vector3(0, 0.35, 0), 80.0, 4.0, 10.0, Vector3(0, -9.8, 0), 0.08, 0.2, 0.18)
+	parent.add_child(dust)
+	dust.global_position = at + Vector3(0, 0.2, 0)
+	dust.emitting = true
+	_free_later(dust, 1.2)
+	var boom := AudioStreamPlayer3D.new()
+	boom.stream = KICK_HIT_SOUND
+	boom.pitch_scale = 0.55
+	boom.volume_db = 4.0
+	boom.max_distance = 45.0
+	boom.unit_size = 22.0
+	parent.add_child(boom)
+	boom.global_position = at
+	boom.play()
+	_free_later(boom, boom.stream.get_length() / boom.pitch_scale + 0.25)
 
 ## Sparks between a hitbox and the body it hit.
 static func sparks(at: Vector3, from: Node) -> void:

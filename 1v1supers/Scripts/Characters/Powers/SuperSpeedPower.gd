@@ -2,7 +2,8 @@ extends Power
 class_name SuperSpeedPower
 ## Speed boots: hold Shift to run at super speed, crackling with lightning and
 ## leaving a trail of phantom copies of yourself; the dodge (Ctrl) becomes a
-## long dash.
+## long dash. Combo: a punch thrown at super speed carries the run's momentum
+## (SPEED PUNCH: double damage, triple knockback).
 
 const RUN_SPEED := 17.0 # m/s (a normal run is 5)
 const DASH_SCALE := 2.2
@@ -11,8 +12,13 @@ const STREAK_EVERY := 0.05 # seconds between afterimages
 const STREAK_LIFE := 0.3 # seconds an afterimage takes to fade out
 const STREAK_COLOR := Color(1.0, 0.6, 0.15)
 const AFTERIMAGE_SHADER := preload("res://Assets/Shaders/afterimage.gdshader")
+const SPEED_PUNCH_MIN := 10.0 # m/s when the punch is thrown
+const SPEED_PUNCH_DAMAGE := 2.2
+const SPEED_PUNCH_KNOCKBACK := 3.0
+const SPEED_PUNCH_WINDOW := 45 # physics frames from the press to the swing's hit window
 
 var _streak_timer: float = 0.0
+var _charged_frame: int = -1000 # physics frame of the last punch thrown at super speed
 var _lightning: SpeedLightning = null
 
 func added() -> void:
@@ -32,9 +38,25 @@ func run_speed() -> float:
 func dash_scale() -> float:
 	return DASH_SCALE
 
+func handle_intent(i: PlayerInput.Intent) -> void:
+	if i.attack_pressed and player.state.name == &"free" and _flat_speed() >= SPEED_PUNCH_MIN:
+		_charged_frame = Engine.get_physics_frames()
+
+func boost_strike(hit: HitInfo) -> float:
+	if Engine.get_physics_frames() - _charged_frame > SPEED_PUNCH_WINDOW:
+		return 1.0
+	_charged_frame = -1000 # one swing only, not the rest of the combo
+	hit.damage *= SPEED_PUNCH_DAMAGE
+	hit.hitstop += 0.06
+	hit.shake += 0.35
+	hit.label = "SPEED PUNCH!"
+	return SPEED_PUNCH_KNOCKBACK
+
+func _flat_speed() -> float:
+	return Vector2(player.velocity.x, player.velocity.z).length()
+
 func physics_update(delta: float) -> void:
-	var flat := Vector2(player.velocity.x, player.velocity.z)
-	var fast := flat.length() > STREAK_MIN_SPEED and not player.is_dead()
+	var fast := _flat_speed() > STREAK_MIN_SPEED and not player.is_dead()
 	if _lightning:
 		_lightning.active = fast
 	if not fast:
@@ -46,7 +68,7 @@ func physics_update(delta: float) -> void:
 		_spawn_afterimage()
 
 func hint() -> String:
-	return "Super speed: hold Shift  (Ctrl dashes far)"
+	return "Super speed: hold Shift  (Ctrl dashes far, punch while running = SPEED PUNCH)"
 
 ## A phantom copy of the runner, frozen in this frame's pose, left where they
 ## just were and fading out. Each of the runner's skeletons (body, cape) gets a

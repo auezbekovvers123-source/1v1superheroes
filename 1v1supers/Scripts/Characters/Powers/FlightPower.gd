@@ -16,4 +16,4 @@ func handle_intent(i: PlayerInput.Intent) -> void:
 		player.try_change_state(&"fly")
 
 func hint() -> String:
-	return "Flight: R, or jump twice  (Space up, C down, Shift fast)"
+	return "Flight: R, or jump twice  (Space up, C down, Shift fast, punch = GROUND SLAM)"

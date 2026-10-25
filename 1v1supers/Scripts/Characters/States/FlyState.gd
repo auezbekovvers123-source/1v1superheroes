@@ -4,7 +4,8 @@ class_name FlyState
 ## with an upward burst; ends on touchdown, on the power button, or when the
 ## cape comes off.
 ## Camera-relative movement, jump = up, fly_down = down, run = sprint-flight
-## (superman pose with a strong forward pitch).
+## (superman pose with a strong forward pitch). Attack dives into a ground slam
+## (SlamState); with the laser visor, aim + attack fires while hovering.
 
 const TAKEOFF_SPEED := 7.0
 const TAKEOFF_TIME := 0.35 # no touchdown and no floor snap while lifting off
@@ -34,6 +35,10 @@ func enter(args: Dictionary) -> void:
 func exit() -> void:
 	player.animator.set_flying(false)
 	player.ease_mesh_upright()
+
+func handle_intent(i: PlayerInput.Intent) -> void:
+	if i.attack_pressed and not i.aim_held:
+		player.try_change_state(&"slam")
 
 func physics_update(_delta: float) -> void:
 	if not player.has_power("fly"):

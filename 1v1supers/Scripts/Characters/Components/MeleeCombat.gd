@@ -72,7 +72,10 @@ func box_for(idx: int) -> Hitbox3D:
 func open_window(idx: int) -> void:
 	var kind := HitInfo.Kind.KICK if is_kick(idx) else HitInfo.Kind.PUNCH
 	var template := HitInfo.make(damage(idx), _body, Vector3.ZERO, kind, COMBO_HITSTOP[idx], COMBO_SHAKE[idx])
-	box_for(idx).activate(template, COMBO_KNOCKBACK[idx], COMBO_HIT_END[idx] - COMBO_HIT_START[idx])
+	var knockback: float = COMBO_KNOCKBACK[idx]
+	if _body is Player:
+		knockback *= (_body as Player).powers.boost_strike(template) # e.g. a punch thrown at super speed
+	box_for(idx).activate(template, knockback, COMBO_HIT_END[idx] - COMBO_HIT_START[idx])
 	_set_debug(idx, true)
 
 func close_window() -> void:

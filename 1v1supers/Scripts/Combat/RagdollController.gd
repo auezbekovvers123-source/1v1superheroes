@@ -105,8 +105,8 @@ func start_ragdoll(hit_direction: Vector3 = Vector3.ZERO, hit_position: Vector3 
 	if skeleton == null:
 		push_warning("[Ragdoll] No Skeleton3D found for %s" % (str(_character_body.name) if _character_body else "unknown"))
 		return
+	about_to_start.emit() # first: the body resets its squash, so the bones are built at true scale
 	_ensure_physical_bones()
-	about_to_start.emit()
 	# Freeze animation so the bones start from the current pose
 	if _anim_tree:
 		_anim_tree.active = false

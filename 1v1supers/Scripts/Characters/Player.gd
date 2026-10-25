@@ -165,6 +165,7 @@ func _ready() -> void:
 		&"block": BlockState.new(self, &"block"),
 		&"stagger": StaggerState.new(self, &"stagger"),
 		&"laser": LaserState.new(self, &"laser"),
+		&"slam": SlamState.new(self, &"slam"),
 	}
 	state = _states[&"free"]
 	intent = input.current()
@@ -612,6 +613,13 @@ func throw_release_anim() -> String:
 func play_throw_release() -> void:
 	animator.play_action(throw_release_anim(), hand.throw_release_anim_speed, 0.08, 0.16, mask_for_movement(0.18))
 
+## Metres from the feet down to the ground (50 when there is none below).
+func height_above_ground() -> float:
+	var q := PhysicsRayQueryParameters3D.create(global_position + Vector3.UP * 0.1, global_position + Vector3.DOWN * 50.0, 1)
+	q.exclude = [get_rid()]
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	return global_position.y - (hit.position as Vector3).y if hit else 50.0
+
 ## True while a worn item grants the power ("fly", "speed", "laser"...).
 func has_power(power_id: String) -> bool:
 	return equipment.has_power(power_id)
@@ -699,7 +707,8 @@ func _on_damaged(hit: HitInfo) -> void:
 		HitReaction.knock(self, hit)
 		return
 	var crit := hit.is_critical()
-	stun_timer = 0.18 if crit else 0.11
+	if hit.stagger <= 0.0:
+		stun_timer = 0.18 if crit else 0.11 # (a stagger stops everything anyway, and lets the body slide)
 	_hurt_flash(crit)
 	camera_shake(0.62 if crit else 0.32)
 	state.on_damaged(hit)
@@ -708,6 +717,8 @@ func _on_damaged(hit: HitInfo) -> void:
 		HitReaction.hitstop(self, hit.hitstop)
 	if hit.guard_broken:
 		stagger(guard.break_stagger)
+	elif hit.stagger > 0.0:
+		stagger(hit.stagger) # knocked off balance: slides further, can't act
 
 ## Knocked off balance for `seconds`: no actions (parried, guard broken).
 func stagger(seconds: float) -> void:

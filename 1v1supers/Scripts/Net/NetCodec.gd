@@ -65,7 +65,7 @@ const HIT_GUARD_BROKEN := 4
 static func encode_hit(hit: HitInfo, attacker_peer: int) -> Array:
 	var flags := (HIT_BLOCKED if hit.blocked else 0) | (HIT_PARRIED if hit.parried else 0) \
 		| (HIT_GUARD_BROKEN if hit.guard_broken else 0)
-	return [hit.damage, hit.knockback, hit.hitstop, hit.shake, int(hit.kind), attacker_peer, flags]
+	return [hit.damage, hit.knockback, hit.hitstop, hit.shake, int(hit.kind), attacker_peer, flags, hit.label, hit.stagger]
 
 static func decode_hit(a: Array, attacker: Node3D) -> HitInfo:
 	var hit := HitInfo.make(float(a[0]), attacker, a[1] as Vector3, int(a[4]) as HitInfo.Kind, float(a[2]), float(a[3]))
@@ -73,6 +73,8 @@ static func decode_hit(a: Array, attacker: Node3D) -> HitInfo:
 	hit.blocked = (flags & HIT_BLOCKED) != 0
 	hit.parried = (flags & HIT_PARRIED) != 0
 	hit.guard_broken = (flags & HIT_GUARD_BROKEN) != 0
+	hit.label = str(a[7]) if a.size() > 7 else ""
+	hit.stagger = float(a[8]) if a.size() > 8 else 0.0
 	return hit
 
 static func hit_attacker_peer(a: Array) -> int:

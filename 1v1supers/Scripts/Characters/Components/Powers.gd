@@ -53,6 +53,13 @@ func dash_scale() -> float:
 		best = maxf(best, p.dash_scale())
 	return best
 
+## Lets every worn power boost a melee swing; returns the knockback multiplier.
+func boost_strike(hit: HitInfo) -> float:
+	var k := 1.0
+	for p: Power in _active.values():
+		k *= p.boost_strike(hit)
+	return k
+
 func hints() -> PackedStringArray:
 	var out := PackedStringArray()
 	for p: Power in _active.values():
