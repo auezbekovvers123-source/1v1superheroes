@@ -1,0 +1,63 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://Scripts/Item/ItemPickup.gd" id="1_pickup"]
+[ext_resource type="Resource" path="res://Assets/Item/Hero Gear/laser_visor_item.tres" id="2_item_data"]
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_pickup"]
+radius = 2.0
+
+[sub_resource type="StandardMaterial3D" id="Mat_band"]
+albedo_color = Color(0.12, 0.12, 0.16, 1)
+metallic = 0.6
+roughness = 0.35
+
+[sub_resource type="StandardMaterial3D" id="Mat_lens"]
+albedo_color = Color(1, 0.1, 0.06, 1)
+emission_enabled = true
+emission = Color(1, 0.1, 0.06, 1)
+emission_energy_multiplier = 3.0
+
+[sub_resource type="CylinderMesh" id="Band"]
+top_radius = 0.245
+bottom_radius = 0.245
+height = 0.07
+radial_segments = 24
+material = SubResource("Mat_band")
+
+[sub_resource type="BoxMesh" id="Lens"]
+size = Vector3(0.24, 0.075, 0.06)
+material = SubResource("Mat_lens")
+
+[node name="LaserVisorPickup" type="Area3D"]
+script = ExtResource("1_pickup")
+item_data = ExtResource("2_item_data")
+item_name = "LaserVisorPickup"
+item_id = "laser_visor"
+pickup_color = Color(1, 0.15, 0.1, 1)
+auto_pickup = false
+require_interact = true
+respawn_time = 0.0
+pickup_radius = 2.0
+bob_amplitude = 0.15
+bob_speed = 1.6
+rotation_speed = 50.0
+pickup_scale = Vector3(1.6, 1.6, 1.6)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+shape = SubResource("SphereShape3D_pickup")
+
+[node name="PickupMesh" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.7, 0)
+
+[node name="Band" type="MeshInstance3D" parent="PickupMesh"]
+mesh = SubResource("Band")
+
+[node name="Lens" type="MeshInstance3D" parent="PickupMesh"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.23)
+mesh = SubResource("Lens")
+
+[node name="PickupLight" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.7, 0)
+light_color = Color(1, 0.15, 0.1, 1)
+omni_range = 2.4
+light_energy = 1.2

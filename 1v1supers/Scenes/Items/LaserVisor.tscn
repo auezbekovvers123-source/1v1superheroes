@@ -1,0 +1,9 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://Scripts/Item/LaserVisorWearable.gd" id="1_visor"]
+
+[node name="LaserVisor" type="BoneAttachment3D"]
+bone_name = "head.x"
+script = ExtResource("1_visor")
+item_name = "Laser Visor"
+item_id = "laser_visor"

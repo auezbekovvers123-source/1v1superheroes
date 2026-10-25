@@ -1,13 +1,15 @@
-[gd_scene load_steps=20 format=3 uid="uid://coue2qehpn4fr"]
+[gd_scene format=3 uid="uid://coue2qehpn4fr"]
 
 [ext_resource type="PackedScene" uid="uid://c9p8k3l2m4n5o" path="res://Scenes/Items/CloakPickup.tscn" id="10_pickup"]
 [ext_resource type="PackedScene" path="res://Scenes/Items/UsablePickup.tscn" id="10_usable"]
 [ext_resource type="PackedScene" path="res://Scenes/Items/RockPickup.tscn" id="10_rock"]
+[ext_resource type="PackedScene" path="res://Scenes/Items/SpeedBootsPickup.tscn" id="10_boots"]
+[ext_resource type="PackedScene" path="res://Scenes/Items/LaserVisorPickup.tscn" id="10_visor"]
+[ext_resource type="PackedScene" path="res://Scenes/Characters/villain.tscn" id="12_villain"]
 [ext_resource type="Script" path="res://Scripts/UI/InventoryUI.gd" id="11_inv_ui"]
 [ext_resource type="Texture2D" uid="uid://b8q44ipg8a3cq" path="res://Assets/Textures/Black.png" id="1_hwes2"]
 [ext_resource type="Texture2D" uid="uid://doyodkg1ds7td" path="res://Assets/Textures/Sky.png" id="1_rrvcb"]
 [ext_resource type="PackedScene" uid="uid://cr2ersq7g6q6f" path="res://Scenes/Characters/player.tscn" id="2_1g73n"]
-[ext_resource type="PackedScene" uid="uid://d7f8g9h0j1k2l" path="res://Scenes/Characters/C11_Player.tscn" id="2_c11"]
 [ext_resource type="PackedScene" path="res://Scenes/Characters/Dummy.tscn" id="2_dummy"]
 [ext_resource type="Texture2D" uid="uid://gwt4mrbmdv01" path="res://Assets/Textures/Orange.png" id="2_087ax"]
 [ext_resource type="Texture2D" uid="uid://dkpqh8de7tb3n" path="res://Assets/Textures/Green.png" id="3_qkav0"]
@@ -117,15 +119,28 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5.5, 0.92, 3.8)
 
 [node name="CloakPickup" parent="." instance=ExtResource("10_pickup")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4.2, 0.5, 0.8)
+respawn_time = 20.0
 
 [node name="CloakPickup2" parent="." instance=ExtResource("10_pickup")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4.0, 0.5, -2.0)
+respawn_time = 20.0
 
 [node name="UsablePickup" parent="." instance=ExtResource("10_usable")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.0, 0.5, -2.2)
 
 [node name="RockPickup" parent="." instance=ExtResource("10_rock")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.0, 0.5, 0.5)
+
+[node name="SpeedBootsPickup" parent="." instance=ExtResource("10_boots")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.6, 0.5, 2.4)
+respawn_time = 20.0
+
+[node name="LaserVisorPickup" parent="." instance=ExtResource("10_visor")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.2, 0.5, -1.6)
+respawn_time = 20.0
+
+[node name="Villain" parent="." instance=ExtResource("12_villain")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 14)
 
 [node name="CityTest" type="Node3D" parent="." groups=["city_test"]]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 80, 0, 80)

@@ -1,0 +1,16 @@
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" uid="uid://cr2ersq7g6q6f" path="res://Scenes/Characters/player.tscn" id="1_player"]
+[ext_resource type="Script" path="res://Scripts/Characters/Input/AIPlayerInput.gd" id="2_ai"]
+[ext_resource type="Script" path="res://Scripts/Characters/Enemy.gd" id="3_enemy"]
+[ext_resource type="Script" path="res://Scripts/Item/ItemData.gd" id="4_item_data"]
+[ext_resource type="Resource" uid="uid://coka02hmxojdk" path="res://Assets/Item/Cloak Assets/cloak_item.tres" id="5_cloak"]
+
+[node name="Villain" instance=ExtResource("1_player")]
+
+[node name="Input" parent="."]
+script = ExtResource("2_ai")
+
+[node name="Enemy" type="Node" parent="."]
+script = ExtResource("3_enemy")
+loadout = Array[ExtResource("4_item_data")]([ExtResource("5_cloak")])
