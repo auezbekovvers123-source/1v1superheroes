@@ -89,6 +89,35 @@ you have and their keys, bottom left.
 Powers stack (cape + boots + visor at once). They work online too: the other
 player sees your gear, your beam and your trail.
 
+### Combos
+
+| Gear | Do | What happens |
+|---|---|---|
+| Speed boots | Punch while sprinting at super speed | **Speed punch**: the run's momentum goes into the first swing — 2.2× damage, 3× knockback |
+| Cape | Punch while flying, at least 1.2 m up | **Ground slam**: a short hang, a dive straight down, and a shockwave around the landing: 8–26 damage (more closer in), throws everyone back and knocks them off balance for up to 0.7 s. You need 0.4 s to recover |
+| Cape + laser visor | Aim and fire while flying | **Laser from the air**: hover in place while the beam fires, then fly on |
+
+## The villain
+
+The prototype level has a computer-controlled villain: the same fighter as you,
+tinted red, with its name and health bar overhead. It starts in a cape. It:
+
+- walks or flies at you, punches combos, and goes round your guard when you
+  block (hits from behind ignore it);
+- blocks about half your punches, sometimes parries or dodges, and blocks a
+  laser aimed at it;
+- picks up gear lying around when you're not close (gear in the level comes
+  back 20 s after it's taken);
+- fights with whatever its gear gives it: laser bursts (also from the air),
+  speed punches, flying above you and slamming down;
+- comes back after a knockout, like you.
+
+Tune it on the villain's `Input` node (`AIPlayerInput`: block, parry and dodge
+chances, aggression, reaction time, gear seeking) and its `Enemy` node (name,
+tint, starting gear). For more villains, instance
+`Scenes/Characters/villain.tscn`. Villains are offline only: when an online
+session starts they leave.
+
 ## Fighting
 
 - **Block** (hold V): hits from the front only chip 15% of their damage and push
@@ -108,10 +137,11 @@ Each piece owns one job; nothing else reaches into it.
 ```
 Player (CharacterBody3D)            Scripts/Characters/Player.gd — locomotion + wiring
 ├─ Input        PlayerInput         WHAT the fighter wants this frame (the only reader of Input)
-│                                   LocalPlayerInput = keyboard/mouse, ScriptedPlayerInput = AI/tests/network
+│                                   LocalPlayerInput = keyboard/mouse, AIPlayerInput = the villain,
+│                                   ScriptedPlayerInput = tests, NetworkPlayerInput = the other player
 ├─ state        PlayerState         WHAT it is doing — exactly one at a time:
 │                                   Free, Attack, Dash, Turn, Gesture, ThrowCharge, UseItem, Fly,
-│                                   Laser, Block, Stagger, Dead
+│                                   Laser, Slam, Block, Stagger, Dead
 ├─ Animator     PlayerAnimator      the only thing that touches the AnimationTree
 ├─ MeleeCombat                      combo data, hitboxes, target finding
 ├─ Guard                            block / parry / guard break: edits incoming hits
@@ -121,8 +151,9 @@ Player (CharacterBody3D)            Scripts/Characters/Player.gd — locomotion 
 ├─ RagdollController, RagdollGrabber
 ├─ Powers                           one Power per worn item that has a power_id:
 │                                   FlightPower, SuperSpeedPower, LaserEyesPower (Scripts/Characters/Powers)
-└─ Inventory (hand), Equipment (worn items)
-   NetSync                          online only: sends this fighter / replays the other one
+├─ Inventory (hand), Equipment (worn items)
+├─ NetSync                          online only: sends this fighter / replays the other one
+└─ Enemy                            villains only: tint, overhead name and health bar, starting gear
 
 Net (autoload)   Scripts/Net/Net.gd — sessions (Steam lobby or ENet), spawns the
                  other player's copy, routes every network message
@@ -137,14 +168,15 @@ NetMenu          the F1 panel
   through `can_enter`.
 - **Adding a power**: give the item an `ItemData.power_id`, write a `Power`
   subclass (hooks: `handle_intent`, `physics_update`, `run_speed`,
-  `dash_scale`, `hint`; a state of its own if it needs one) and add a line to
+  `dash_scale`, `boost_strike`, `hint`; a state of its own if it needs one) and add a line to
   `Powers.REGISTRY`. Worn gear without art yet subclasses `GearWearable`, which
   builds it from boxes placed in character space (+Y up, +Z forward).
 - **Hits** travel as a `HitInfo` (damage, knockback, hitstop, attacker, kind).
   `Health` only keeps score; the body that was hit applies knockback
   (`HitReaction`), and `RagdollController` alone starts the death ragdoll.
 - **A second fighter / AI**: instance `Scenes/Characters/player.tscn` and call
-  `set_input(ScriptedPlayerInput.new())` (or your own `PlayerInput` subclass).
+  `set_input(ScriptedPlayerInput.new())` (or your own `PlayerInput` subclass;
+  `villain.tscn` is player.tscn with an `AIPlayerInput`).
   Only the fighter with a local human input gets the camera and the mouse, and
   the HUD/inventory follow the `local_player` group.
 
@@ -154,7 +186,11 @@ Headless gameplay tests drive the player through `ScriptedPlayerInput` and check
 speeds, jump heights, dash distance, combo damage/timing, throws, flight,
 death/respawn, grabbing, two-player independence, block/parry/guard break/dodge
 (`test_defense`), the item powers (`test_powers`: gear worn on pickup, super
-speed, laser damage/stamina/walls, flight take-off) and the inventory UI. Numbers marked *golden* were measured on
+speed, laser damage/stamina/walls, flight take-off), the combos
+(`test_combos`: speed punch, laser while flying, ground slam), the villain
+(`test_ai`: punches, blocking, collecting gear, speed punch, laser, slam,
+respawn, leaving when a session starts) and the inventory UI. Tests remove the
+villain unless they ask for it (`load_level(path, true)`). Numbers marked *golden* were measured on
 the game before the refactor.
 
 The network tests start a second Godot process and play a real session over

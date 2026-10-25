@@ -22,8 +22,15 @@ func _initialize() -> void:
 func run() -> void:
 	pass
 
-func load_level(path: String = "res://prototype.tscn") -> void:
+## Loads a level. Its villains are removed unless `keep_enemies`: most tests
+## measure one fighter on its own.
+func load_level(path: String = "res://prototype.tscn", keep_enemies: bool = false) -> void:
 	change_scene_to_file(path)
+	await process_frame
+	await process_frame # the new scene is current now
+	if not keep_enemies:
+		for e in get_nodes_in_group("enemy"):
+			e.free()
 	await frames(30)
 	player = current_scene.find_child("Player", true, false) as Player
 	pin = ScriptedPlayerInput.new()

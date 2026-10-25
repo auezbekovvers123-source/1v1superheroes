@@ -300,7 +300,7 @@ func _attach(scene: Node) -> void:
 func _find_local_fighter(scene: Node) -> Player:
 	for n in get_tree().get_nodes_in_group("player"):
 		var p := n as Player
-		if p and not p.is_remote() and scene.is_ancestor_of(p):
+		if p and not p.is_remote() and not p.is_in_group("enemy") and scene.is_ancestor_of(p):
 			return p
 	return null
 
